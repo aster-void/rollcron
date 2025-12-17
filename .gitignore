@@ -13,3 +13,7 @@ devenv.local.yaml
 # Added by cargo
 
 /target
+
+# nix
+result
+result-*

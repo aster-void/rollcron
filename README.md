@@ -16,12 +16,14 @@ cargo install --path .
 # Run directly
 nix run github:aster-void/rollcron -- /path/to/repo
 
-# Install to profile
+# Install
 nix profile install github:aster-void/rollcron
 
-# Development shell
-nix develop
+# Open a shell
+nix shell github:aster-void/rollcron
 ```
+
+I recommend installing this via https://github.com/aster-void/nix-repository for build cache.
 
 ## Quick Start
 
