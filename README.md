@@ -36,8 +36,8 @@ rollcron /path/to/repo
 # Remote repository (auto-clones)
 rollcron https://github.com/user/my-cron-jobs
 
-# Custom pull interval (30 seconds)
-rollcron https://github.com/user/repo -i 30
+# Custom pull interval (5 minutes)
+rollcron https://github.com/user/repo --pull-interval 300
 ```
 
 ## Configuration
@@ -52,6 +52,31 @@ jobs:
       cron: "* * * * *"       # Cron expression (5 fields)
     run: command              # Shell command
     timeout: 10s              # Optional (default: 10s)
+    concurrency: skip         # Optional: parallel|wait|skip|replace (default: skip)
+    retry:                    # Optional
+      max: 3                  # Max retry attempts
+      delay: 1s               # Initial delay (default: 1s), exponential backoff
+```
+
+### Concurrency
+
+Controls behavior when a job is triggered while a previous instance is still running:
+
+| Mode | Behavior |
+|------|----------|
+| `parallel` | Run new instance alongside existing one |
+| `wait` | Queue new instance to run after current finishes |
+| `skip` | Skip this trigger (default) |
+| `replace` | Kill running instance, start new one |
+
+### Retry
+
+Jobs can automatically retry on failure with exponential backoff:
+
+```yaml
+retry:
+  max: 3      # Retry up to 3 times
+  delay: 2s   # Initial delay (doubles each retry: 2s, 4s, 8s)
 ```
 
 ### Cron Expression
@@ -95,14 +120,14 @@ Jobs run in their own snapshot directories, so git pulls don't interfere with ru
 ## CLI Reference
 
 ```
-rollcron [OPTIONS] [REPO]
+rollcron [OPTIONS] <REPO>
 
 Arguments:
-  [REPO]  Local path or remote URL [default: .]
+  <REPO>  Local path or remote URL (required)
 
 Options:
-  -i, --interval <SECS>  Pull interval in seconds [default: 60]
-  -h, --help             Print help
+      --pull-interval <SECS>  Pull interval in seconds [default: 3600]
+  -h, --help                  Print help
 ```
 
 ## Example: GitHub Actions-style Workflow
@@ -116,6 +141,9 @@ jobs:
     run: |
       npm install
       npm test
+    retry:
+      max: 2
+      delay: 30s
 
   deploy:
     name: "Deploy to Production"
@@ -123,11 +151,13 @@ jobs:
       cron: "0 0 * * *"
     run: ./deploy.sh
     timeout: 10m
+    concurrency: skip      # Don't deploy if previous deploy is running
 
   cleanup:
     schedule:
       cron: "0 3 * * 0"
     run: find /tmp -mtime +7 -delete
+    concurrency: replace   # Kill old cleanup, start fresh
 ```
 
 ## License
