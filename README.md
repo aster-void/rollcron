@@ -4,8 +4,23 @@ Self-updating cron scheduler that pulls job definitions from git.
 
 ## Installation
 
+### Cargo
+
 ```bash
 cargo install --path .
+```
+
+### Nix
+
+```bash
+# Run directly
+nix run github:aster-void/rollcron -- /path/to/repo
+
+# Install to profile
+nix profile install github:aster-void/rollcron
+
+# Development shell
+nix develop
 ```
 
 ## Quick Start
@@ -45,6 +60,10 @@ rollcron https://github.com/user/repo --pull-interval 300
 ### rollcron.yaml
 
 ```yaml
+runner:                       # Optional: global settings
+  working_dir: ./scripts      # Working directory (relative to job dir)
+  timezone: Asia/Tokyo        # Timezone for cron schedules (default: UTC)
+
 jobs:
   <job-id>:                   # Key is the job ID (used for directories)
     name: "Display Name"      # Optional: display name (defaults to job ID)
@@ -57,6 +76,15 @@ jobs:
       max: 3                  # Max retry attempts
       delay: 1s               # Initial delay (default: 1s), exponential backoff
 ```
+
+### Runner
+
+Global settings that apply to all jobs:
+
+| Field | Description |
+|-------|-------------|
+| `working_dir` | Working directory for all jobs (relative to job snapshot dir) |
+| `timezone` | Timezone for cron schedule interpretation (e.g., `Asia/Tokyo`, `America/New_York`) |
 
 ### Concurrency
 
