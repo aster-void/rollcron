@@ -6,6 +6,22 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
 
+fn validate_job_id(id: &str) -> Result<()> {
+    if id.is_empty() {
+        anyhow::bail!("Job ID cannot be empty");
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        anyhow::bail!(
+            "Invalid job ID '{}': must contain only alphanumeric characters, underscores, and hyphens",
+            id
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum TimezoneConfig {
     #[default]
@@ -116,6 +132,8 @@ pub fn parse_config(content: &str) -> Result<(RunnerConfig, Vec<Job>)> {
         .jobs
         .into_iter()
         .map(|(id, job)| {
+            validate_job_id(&id)?;
+
             let schedule_str = format!("{} *", job.schedule.cron);
             let schedule = Schedule::from_str(&schedule_str)
                 .map_err(|e| anyhow!("Invalid cron '{}' in job '{}': {}", job.schedule.cron, id, e))?;
@@ -128,6 +146,12 @@ pub fn parse_config(content: &str) -> Result<(RunnerConfig, Vec<Job>)> {
             let retry = job
                 .retry
                 .map(|r| {
+                    if r.max == 0 {
+                        anyhow::bail!(
+                            "Invalid retry.max '0' in job '{}': must be at least 1 (use no retry config to disable retries)",
+                            id
+                        );
+                    }
                     let delay = parse_duration(&r.delay)
                         .map_err(|e| anyhow!("Invalid retry delay '{}' in job '{}': {}", r.delay, id, e))?;
                     let jitter = r.jitter
@@ -468,5 +492,56 @@ jobs:
     fn parse_duration_milliseconds() {
         assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
         assert_eq!(parse_duration("1000ms").unwrap(), Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn reject_invalid_job_id() {
+        let yaml = r#"
+jobs:
+  "../escape":
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+"#;
+        assert!(parse_config(yaml).is_err());
+    }
+
+    #[test]
+    fn reject_job_id_with_slash() {
+        let yaml = r#"
+jobs:
+  "foo/bar":
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+"#;
+        assert!(parse_config(yaml).is_err());
+    }
+
+    #[test]
+    fn accept_valid_job_id() {
+        let yaml = r#"
+jobs:
+  my-job_123:
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs[0].id, "my-job_123");
+    }
+
+    #[test]
+    fn reject_retry_max_zero() {
+        let yaml = r#"
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+    retry:
+      max: 0
+"#;
+        assert!(parse_config(yaml).is_err());
     }
 }

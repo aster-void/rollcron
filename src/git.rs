@@ -1,11 +1,13 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Ensures repo is cloned/synced to cache. Returns cache path.
 pub fn ensure_repo(source: &str) -> Result<PathBuf> {
     let cache_dir = get_cache_dir(source)?;
-    std::fs::create_dir_all(cache_dir.parent().unwrap())?;
+    if let Some(parent) = cache_dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
 
     if cache_dir.exists() {
         sync_repo(source, &cache_dir)?;
@@ -25,8 +27,11 @@ fn is_remote(source: &str) -> bool {
 
 fn clone_repo(source: &str, dest: &Path) -> Result<()> {
     if is_remote(source) {
+        let dest_str = dest
+            .to_str()
+            .context("Destination path contains invalid UTF-8")?;
         let output = Command::new("git")
-            .args(["clone", source, dest.to_str().unwrap()])
+            .args(["clone", source, dest_str])
             .output()?;
 
         if !output.status.success() {
@@ -73,13 +78,17 @@ fn sync_repo(source: &str, dest: &Path) -> Result<()> {
 fn rsync_local(source: &str, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest)?;
 
+    let dest_str = dest
+        .to_str()
+        .context("Destination path contains invalid UTF-8")?;
     let output = Command::new("rsync")
         .args([
             "-a",
             "--delete",
-            "--exclude", ".git",
+            "--exclude",
+            ".git",
             &format!("{}/", source),
-            dest.to_str().unwrap(),
+            dest_str,
         ])
         .output()?;
 
@@ -121,16 +130,33 @@ pub fn get_job_dir(sot_path: &Path, job_id: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join("rollcron");
 
-    let sot_name = sot_path.file_name().unwrap().to_str().unwrap();
+    let sot_name = sot_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown");
 
     cache_base.join(format!("{}@{}", sot_name, job_id))
 }
 
 pub fn sync_to_job_dir(sot_path: &Path, job_dir: &Path) -> Result<()> {
-    if job_dir.exists() {
-        std::fs::remove_dir_all(job_dir)?;
+    let sot_str = sot_path
+        .to_str()
+        .context("Source path contains invalid UTF-8")?;
+    let job_dir_str = job_dir
+        .to_str()
+        .context("Job directory path contains invalid UTF-8")?;
+
+    // Use atomic temp directory to avoid TOCTOU race condition
+    let temp_dir = job_dir.with_extension("tmp");
+    let temp_dir_str = temp_dir
+        .to_str()
+        .context("Temp directory path contains invalid UTF-8")?;
+
+    // Clean up any leftover temp directory
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(&temp_dir)?;
     }
-    std::fs::create_dir_all(job_dir)?;
+    std::fs::create_dir_all(&temp_dir)?;
 
     // Check if .git exists (remote repos have it, local rsync'd repos don't)
     if sot_path.join(".git").exists() {
@@ -141,34 +167,60 @@ pub fn sync_to_job_dir(sot_path: &Path, job_dir: &Path) -> Result<()> {
             .output()?;
 
         if !archive.status.success() {
+            std::fs::remove_dir_all(&temp_dir)?;
             let stderr = String::from_utf8_lossy(&archive.stderr);
             anyhow::bail!("git archive failed: {}", stderr);
         }
 
-        let extract = Command::new("tar")
-            .args(["-x"])
-            .current_dir(job_dir)
+        // Extract with security flags to prevent path traversal
+        let mut extract = Command::new("tar")
+            .args(["--no-absolute-file-names", "-x"])
+            .current_dir(&temp_dir)
             .stdin(std::process::Stdio::piped())
             .spawn()?;
 
-        use std::io::Write;
-        extract.stdin.unwrap().write_all(&archive.stdout)?;
+        {
+            use std::io::Write;
+            let stdin = extract
+                .stdin
+                .as_mut()
+                .context("Failed to open tar stdin")?;
+            stdin.write_all(&archive.stdout)?;
+        }
+
+        let status = extract.wait()?;
+        if !status.success() {
+            std::fs::remove_dir_all(&temp_dir)?;
+            anyhow::bail!("tar extraction failed with exit code: {:?}", status.code());
+        }
     } else {
         // For non-git dirs (rsync'd local repos), use rsync
         let output = Command::new("rsync")
             .args([
                 "-a",
                 "--delete",
-                &format!("{}/", sot_path.to_str().unwrap()),
-                job_dir.to_str().unwrap(),
+                &format!("{}/", sot_str),
+                temp_dir_str,
             ])
             .output()?;
 
         if !output.status.success() {
+            std::fs::remove_dir_all(&temp_dir)?;
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("rsync failed: {}", stderr);
         }
     }
+
+    // Atomic swap: remove old, rename temp to target
+    if job_dir.exists() {
+        std::fs::remove_dir_all(job_dir)?;
+    }
+    std::fs::rename(&temp_dir, job_dir).with_context(|| {
+        format!(
+            "Failed to rename {} to {}",
+            temp_dir_str, job_dir_str
+        )
+    })?;
 
     Ok(())
 }

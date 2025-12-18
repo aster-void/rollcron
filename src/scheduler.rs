@@ -1,21 +1,24 @@
 use crate::config::{Concurrency, Job, RetryConfig, RunnerConfig, TimezoneConfig};
 use crate::git;
+use crate::{JobHandles, RunningJobs};
 use anyhow::Result;
 use chrono::{Local, TimeZone, Utc};
 use rand::Rng;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::process::Command;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
-pub async fn run_scheduler(jobs: Vec<Job>, sot_path: PathBuf, runner: RunnerConfig) -> Result<()> {
-    let running: Arc<Mutex<HashMap<String, Vec<JoinHandle<()>>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-
+pub async fn run_scheduler(
+    jobs: Vec<Job>,
+    sot_path: PathBuf,
+    runner: RunnerConfig,
+    running_jobs: RunningJobs,
+    job_handles: JobHandles,
+) -> Result<()> {
     loop {
         for job in &jobs {
             let is_due = match &runner.timezone {
@@ -26,7 +29,7 @@ pub async fn run_scheduler(jobs: Vec<Job>, sot_path: PathBuf, runner: RunnerConf
 
             if is_due {
                 let work_dir = resolve_work_dir(&sot_path, &job.id, &job.working_dir);
-                handle_job_trigger(job, work_dir, &running).await;
+                handle_job_trigger(job, work_dir, &job_handles, &running_jobs).await;
             }
         }
 
@@ -58,10 +61,11 @@ fn resolve_work_dir(sot_path: &PathBuf, job_id: &str, working_dir: &Option<Strin
 async fn handle_job_trigger(
     job: &Job,
     work_dir: PathBuf,
-    running: &Arc<Mutex<HashMap<String, Vec<JoinHandle<()>>>>>,
+    job_handles: &JobHandles,
+    running_jobs: &RunningJobs,
 ) {
     let tag = format!("[job:{}]", job.id);
-    let mut map = running.lock().await;
+    let mut map = job_handles.lock().await;
 
     // Clean up finished jobs
     if let Some(handles) = map.get_mut(&job.id) {
@@ -75,51 +79,94 @@ async fn handle_job_trigger(
 
     match job.concurrency {
         Concurrency::Parallel => {
-            spawn_job(job, work_dir, &mut map);
+            spawn_job(job, work_dir, &mut map, running_jobs).await;
         }
         Concurrency::Wait => {
             if running_count > 0 {
-                println!("{} Waiting for {} previous run(s) to complete", tag, running_count);
+                println!(
+                    "{} Waiting for {} previous run(s) to complete",
+                    tag, running_count
+                );
                 let handles = map.remove(&job.id).unwrap();
                 drop(map); // Release lock while waiting
                 for handle in handles {
                     let _ = handle.await;
                 }
-                let mut map = running.lock().await;
-                spawn_job(job, work_dir, &mut map);
+                // Re-acquire lock and spawn
+                // Note: Since we have a single scheduler loop, no new instances
+                // can be added while we're waiting, so we can safely spawn.
+                let mut map = job_handles.lock().await;
+                // Defensive check: clean up any handles that completed during wait
+                if let Some(handles) = map.get_mut(&job.id) {
+                    handles.retain(|h| !h.is_finished());
+                    if handles.is_empty() {
+                        map.remove(&job.id);
+                    }
+                }
+                spawn_job(job, work_dir, &mut map, running_jobs).await;
             } else {
-                spawn_job(job, work_dir, &mut map);
+                spawn_job(job, work_dir, &mut map, running_jobs).await;
             }
         }
         Concurrency::Skip => {
             if running_count > 0 {
                 println!("{} Skipped ({} instance(s) still active)", tag, running_count);
             } else {
-                spawn_job(job, work_dir, &mut map);
+                spawn_job(job, work_dir, &mut map, running_jobs).await;
             }
         }
         Concurrency::Replace => {
             if running_count > 0 {
                 println!("{} Replacing {} previous run(s)", tag, running_count);
                 let handles = map.remove(&job.id).unwrap();
+                let abort_count = handles.len();
                 for handle in handles {
                     handle.abort();
                 }
+                // Decrement running count for aborted jobs
+                {
+                    let mut rj = running_jobs.write().await;
+                    if let Some(count) = rj.get_mut(&job.id) {
+                        *count = count.saturating_sub(abort_count);
+                        if *count == 0 {
+                            rj.remove(&job.id);
+                        }
+                    }
+                }
             }
-            spawn_job(job, work_dir, &mut map);
+            spawn_job(job, work_dir, &mut map, running_jobs).await;
         }
     }
 }
 
-fn spawn_job(
+async fn spawn_job(
     job: &Job,
     work_dir: PathBuf,
     map: &mut HashMap<String, Vec<JoinHandle<()>>>,
+    running_jobs: &RunningJobs,
 ) {
     let job_id = job.id.clone();
     let job = job.clone();
+    let running_jobs = Arc::clone(running_jobs);
+
+    // Increment running count before spawning
+    {
+        let mut rj = running_jobs.write().await;
+        *rj.entry(job_id.clone()).or_insert(0) += 1;
+    }
+
     let handle = tokio::spawn(async move {
         execute_job(&job, &work_dir).await;
+        // Decrement running count when done
+        {
+            let mut rj = running_jobs.write().await;
+            if let Some(count) = rj.get_mut(&job.id) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    rj.remove(&job.id);
+                }
+            }
+        }
     });
 
     map.entry(job_id).or_default().push(handle);
@@ -184,33 +231,33 @@ fn generate_jitter(max: Duration) -> Duration {
 }
 
 async fn run_command(job: &Job, work_dir: &PathBuf) -> CommandResult {
-    let result = tokio::time::timeout(job.timeout, async {
-        tokio::task::spawn_blocking({
-            let cmd = job.command.clone();
-            let dir = work_dir.clone();
-            move || {
-                Command::new("sh")
-                    .args(["-c", &cmd])
-                    .current_dir(&dir)
-                    .output()
-            }
-        })
-        .await
-    })
-    .await;
+    let child = match Command::new("sh")
+        .args(["-c", &job.command])
+        .current_dir(work_dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return CommandResult::ExecError(e.to_string()),
+    };
+
+    let result = tokio::time::timeout(job.timeout, child.wait_with_output()).await;
 
     match result {
-        Ok(Ok(Ok(output))) => CommandResult::Completed(output),
-        Ok(Ok(Err(e))) => CommandResult::ExecError(e.to_string()),
-        Ok(Err(e)) => CommandResult::TaskError(e.to_string()),
-        Err(_) => CommandResult::Timeout,
+        Ok(Ok(output)) => CommandResult::Completed(output),
+        Ok(Err(e)) => CommandResult::ExecError(e.to_string()),
+        Err(_) => {
+            // Timeout: child is killed automatically by kill_on_drop(true)
+            CommandResult::Timeout
+        }
     }
 }
 
 enum CommandResult {
     Completed(std::process::Output),
     ExecError(String),
-    TaskError(String),
     Timeout,
 }
 
@@ -245,10 +292,6 @@ fn handle_result(tag: &str, job: &Job, result: &CommandResult) -> bool {
         }
         CommandResult::ExecError(e) => {
             eprintln!("{} ✗ Failed to execute: {}", tag, e);
-            false
-        }
-        CommandResult::TaskError(e) => {
-            eprintln!("{} ✗ Task error: {}", tag, e);
             false
         }
         CommandResult::Timeout => {
