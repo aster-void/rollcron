@@ -125,9 +125,9 @@ pub fn sync_to_job_dir(sot_path: &Path, job_dir: &Path) -> Result<()> {
         anyhow::bail!("git archive failed: {}", stderr);
     }
 
-    // Extract with security flags to prevent path traversal
+    // Extract (git archive output uses relative paths, tar strips leading '/' by default)
     let mut extract = Command::new("tar")
-        .args(["--no-absolute-file-names", "-x"])
+        .args(["-x"])
         .current_dir(&temp_dir)
         .stdin(std::process::Stdio::piped())
         .spawn()?;
