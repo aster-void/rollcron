@@ -86,7 +86,7 @@ jobs:
 
 ### Startup
 1. Parse CLI args (repo, interval)
-2. Clone if remote URL, otherwise use local path
+2. Clone repo to cache via `git clone` (both local and remote)
 3. Load config from `rollcron.yaml`
 4. Sync job directories via `git archive` (using job ID)
 5. Start pull task + scheduler
