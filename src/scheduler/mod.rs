@@ -106,10 +106,16 @@ impl Handler<Tick> for Scheduler {
         let due_jobs: Vec<Job> = self
             .jobs
             .iter()
-            .filter(|job| match &self.runner.timezone {
-                TimezoneConfig::Utc => is_job_due(&job.schedule, Utc),
-                TimezoneConfig::Inherit => is_job_due(&job.schedule, Local),
-                TimezoneConfig::Named(tz) => is_job_due(&job.schedule, *tz),
+            .filter(|job| {
+                if !job.enabled {
+                    return false;
+                }
+                let tz_config = job.timezone.as_ref().unwrap_or(&self.runner.timezone);
+                match tz_config {
+                    TimezoneConfig::Utc => is_job_due(&job.schedule, Utc),
+                    TimezoneConfig::Inherit => is_job_due(&job.schedule, Local),
+                    TimezoneConfig::Named(tz) => is_job_due(&job.schedule, *tz),
+                }
             })
             .cloned()
             .collect();

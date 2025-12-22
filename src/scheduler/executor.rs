@@ -4,6 +4,7 @@ use tokio::process::Command;
 use tokio::time::sleep;
 
 use crate::config::Job;
+use crate::env;
 use crate::git;
 
 use super::backoff::{calculate_backoff, generate_jitter};
@@ -11,7 +12,20 @@ use super::backoff::{calculate_backoff, generate_jitter};
 pub fn resolve_work_dir(sot_path: &PathBuf, job_id: &str, working_dir: &Option<String>) -> PathBuf {
     let job_dir = git::get_job_dir(sot_path, job_id);
     match working_dir {
-        Some(dir) => job_dir.join(dir),
+        Some(dir) => {
+            let work_path = job_dir.join(dir);
+            // Canonicalize to resolve .. and symlinks, then verify path is within job_dir
+            match (work_path.canonicalize(), job_dir.canonicalize()) {
+                (Ok(resolved), Ok(base)) if resolved.starts_with(&base) => resolved,
+                _ => {
+                    eprintln!(
+                        "[job:{}] Invalid working_dir '{}': path traversal or non-existent",
+                        job_id, dir
+                    );
+                    job_dir
+                }
+            }
+        }
         None => job_dir,
     }
 }
@@ -32,9 +46,11 @@ pub async fn execute_job(job: &Job, work_dir: &PathBuf) {
 
     for attempt in 0..max_attempts {
         if attempt > 0 {
-            let delay = calculate_backoff(job.retry.as_ref().unwrap(), attempt - 1);
-            println!("{} Retry {}/{} after {:?}", tag, attempt, max_attempts - 1, delay);
-            sleep(delay).await;
+            if let Some(retry) = job.retry.as_ref() {
+                let delay = calculate_backoff(retry, attempt - 1);
+                println!("{} Retry {}/{} after {:?}", tag, attempt, max_attempts - 1, delay);
+                sleep(delay).await;
+            }
         }
 
         println!("{} Starting '{}'", tag, job.name);
@@ -54,14 +70,27 @@ pub async fn execute_job(job: &Job, work_dir: &PathBuf) {
 }
 
 async fn run_command(job: &Job, work_dir: &PathBuf) -> CommandResult {
-    let child = match Command::new("sh")
-        .args(["-c", &job.command])
+    // Load .env file if it exists
+    let env_vars = match env::load_env_file(work_dir) {
+        Ok(vars) => vars,
+        Err(e) => {
+            return CommandResult::ExecError(format!("Failed to load .env file: {}", e));
+        }
+    };
+
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", &job.command])
         .current_dir(work_dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
+        .kill_on_drop(true);
+
+    // Apply environment variables from .env file
+    for (key, value) in env_vars {
+        cmd.env(key, value);
+    }
+
+    let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return CommandResult::ExecError(e.to_string()),
     };
@@ -141,6 +170,8 @@ mod tests {
             retry: None,
             working_dir: None,
             jitter: None,
+            enabled: true,
+            timezone: None,
         }
     }
 
@@ -194,5 +225,23 @@ mod tests {
         let start = std::time::Instant::now();
         execute_job(&job, &dir.path().to_path_buf()).await;
         assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn job_with_env_file() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+        std::fs::write(&env_path, "TEST_VAR=hello\nOTHER_VAR=world").unwrap();
+
+        let job = make_job("echo $TEST_VAR $OTHER_VAR", 10);
+        execute_job(&job, &dir.path().to_path_buf()).await;
+    }
+
+    #[tokio::test]
+    async fn job_without_env_file() {
+        let dir = tempdir().unwrap();
+        // No .env file created - should work fine
+        let job = make_job("echo no env file", 10);
+        execute_job(&job, &dir.path().to_path_buf()).await;
     }
 }

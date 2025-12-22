@@ -69,6 +69,8 @@ pub struct JobConfig {
     pub retry: Option<RetryConfigRaw>,
     pub working_dir: Option<String>,
     pub jitter: Option<String>,
+    pub enabled: Option<bool>,
+    pub timezone: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +106,8 @@ pub struct Job {
     pub retry: Option<RetryConfig>,
     pub working_dir: Option<String>,
     pub jitter: Option<Duration>,
+    pub enabled: bool,
+    pub timezone: Option<TimezoneConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +172,19 @@ pub fn parse_config(content: &str) -> Result<(RunnerConfig, Vec<Job>)> {
                     .map_err(|e| anyhow!("Invalid jitter '{}' in job '{}': {}", j, id, e)))
                 .transpose()?;
 
+            let job_timezone = job
+                .timezone
+                .map(|tz| {
+                    if tz == "inherit" {
+                        Ok(TimezoneConfig::Inherit)
+                    } else {
+                        tz.parse::<Tz>()
+                            .map(TimezoneConfig::Named)
+                            .map_err(|e| anyhow!("Invalid timezone '{}' in job '{}': {}", tz, id, e))
+                    }
+                })
+                .transpose()?;
+
             Ok(Job {
                 id,
                 name,
@@ -178,6 +195,8 @@ pub fn parse_config(content: &str) -> Result<(RunnerConfig, Vec<Job>)> {
                 retry,
                 working_dir: job.working_dir,
                 jitter,
+                enabled: job.enabled.unwrap_or(true),
+                timezone: job_timezone,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -541,6 +560,100 @@ jobs:
     run: echo test
     retry:
       max: 0
+"#;
+        assert!(parse_config(yaml).is_err());
+    }
+
+    #[test]
+    fn parse_enabled_false() {
+        let yaml = r#"
+jobs:
+  test_disabled:
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+    enabled: false
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs[0].enabled, false);
+    }
+
+    #[test]
+    fn parse_enabled_true() {
+        let yaml = r#"
+jobs:
+  test_enabled:
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+    enabled: true
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs[0].enabled, true);
+    }
+
+    #[test]
+    fn parse_enabled_default() {
+        let yaml = r#"
+jobs:
+  test_default:
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs[0].enabled, true);
+    }
+
+    #[test]
+    fn parse_job_with_timezone() {
+        let yaml = r#"
+runner:
+  timezone: Asia/Tokyo
+jobs:
+  job1:
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+    timezone: America/New_York
+  job2:
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+"#;
+        let (runner, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(runner.timezone, TimezoneConfig::Named(chrono_tz::Asia::Tokyo));
+        let find = |id: &str| jobs.iter().find(|j| j.id == id).unwrap();
+        assert_eq!(
+            find("job1").timezone,
+            Some(TimezoneConfig::Named(chrono_tz::America::New_York))
+        );
+        assert!(find("job2").timezone.is_none());
+    }
+
+    #[test]
+    fn parse_job_timezone_inherit() {
+        let yaml = r#"
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+    timezone: inherit
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs[0].timezone, Some(TimezoneConfig::Inherit));
+    }
+
+    #[test]
+    fn parse_invalid_job_timezone() {
+        let yaml = r#"
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+    timezone: Invalid/Zone
 "#;
         assert!(parse_config(yaml).is_err());
     }
