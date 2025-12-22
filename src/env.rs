@@ -1,46 +1,30 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Load environment variables from .env file if it exists.
 /// Returns a HashMap of key-value pairs.
 /// If the .env file doesn't exist, returns an empty HashMap (no error).
+#[allow(dead_code)]
 pub fn load_env_file(dir: &Path) -> Result<HashMap<String, String>> {
     let env_path = dir.join(".env");
+    load_env_from_path(&env_path)
+}
 
-    if !env_path.exists() {
+/// Load environment variables from a specific .env file path.
+/// Returns a HashMap of key-value pairs.
+/// If the file doesn't exist, returns an empty HashMap (no error).
+pub fn load_env_from_path(path: &PathBuf) -> Result<HashMap<String, String>> {
+    if !path.exists() {
         return Ok(HashMap::new());
     }
 
-    let content = std::fs::read_to_string(&env_path)?;
+    let iter = dotenvy::from_path_iter(path)?;
     let mut vars = HashMap::new();
-
-    for line in content.lines() {
-        let line = line.trim();
-
-        // Skip empty lines and comments
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        // Parse KEY=VALUE
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim().to_string();
-            let value = value.trim().to_string();
-
-            // Remove quotes from value if present
-            let value = if (value.starts_with('"') && value.ends_with('"'))
-                || (value.starts_with('\'') && value.ends_with('\''))
-            {
-                value[1..value.len() - 1].to_string()
-            } else {
-                value
-            };
-
-            vars.insert(key, value);
-        }
+    for item in iter {
+        let (key, value) = item?;
+        vars.insert(key, value);
     }
-
     Ok(vars)
 }
 
@@ -107,9 +91,28 @@ mod tests {
     fn test_load_env_with_spaces() {
         let dir = TempDir::new().unwrap();
         let env_path = dir.path().join(".env");
-        fs::write(&env_path, "KEY = value with spaces").unwrap();
+        fs::write(&env_path, "KEY=\"value with spaces\"").unwrap();
 
         let vars = load_env_file(dir.path()).unwrap();
         assert_eq!(vars.get("KEY"), Some(&"value with spaces".to_string()));
+    }
+
+    #[test]
+    fn test_load_env_from_path_exists() {
+        let dir = TempDir::new().unwrap();
+        let env_path = dir.path().join("custom.env");
+        fs::write(&env_path, "FOO=bar\nBAZ=qux").unwrap();
+
+        let vars = load_env_from_path(&env_path).unwrap();
+        assert_eq!(vars.get("FOO"), Some(&"bar".to_string()));
+        assert_eq!(vars.get("BAZ"), Some(&"qux".to_string()));
+    }
+
+    #[test]
+    fn test_load_env_from_path_missing() {
+        let dir = TempDir::new().unwrap();
+        let env_path = dir.path().join("missing.env");
+        let vars = load_env_from_path(&env_path).unwrap();
+        assert!(vars.is_empty());
     }
 }

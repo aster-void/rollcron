@@ -33,11 +33,15 @@ pub enum TimezoneConfig {
 #[derive(Debug, Clone, Default)]
 pub struct RunnerConfig {
     pub timezone: TimezoneConfig,
+    pub env_file: Option<String>,
+    pub env: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 struct RunnerConfigRaw {
     timezone: Option<String>,
+    env_file: Option<String>,
+    env: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -70,7 +74,8 @@ pub struct JobConfig {
     pub working_dir: Option<String>,
     pub jitter: Option<String>,
     pub enabled: Option<bool>,
-    pub timezone: Option<String>,
+    pub env_file: Option<String>,
+    pub env: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,6 +94,7 @@ fn default_retry_delay() -> String {
 #[derive(Debug, Deserialize)]
 pub struct ScheduleConfig {
     pub cron: String,
+    pub timezone: Option<String>,
 }
 
 fn default_timeout() -> String {
@@ -108,6 +114,8 @@ pub struct Job {
     pub jitter: Option<Duration>,
     pub enabled: bool,
     pub timezone: Option<TimezoneConfig>,
+    pub env_file: Option<String>,
+    pub env: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,7 +138,11 @@ pub fn parse_config(content: &str) -> Result<(RunnerConfig, Vec<Job>)> {
         ),
     };
 
-    let runner = RunnerConfig { timezone };
+    let runner = RunnerConfig {
+        timezone: timezone.clone(),
+        env_file: config.runner.env_file,
+        env: config.runner.env,
+    };
 
     let jobs = config
         .jobs
@@ -173,6 +185,7 @@ pub fn parse_config(content: &str) -> Result<(RunnerConfig, Vec<Job>)> {
                 .transpose()?;
 
             let job_timezone = job
+                .schedule
                 .timezone
                 .map(|tz| {
                     if tz == "inherit" {
@@ -183,7 +196,8 @@ pub fn parse_config(content: &str) -> Result<(RunnerConfig, Vec<Job>)> {
                             .map_err(|e| anyhow!("Invalid timezone '{}' in job '{}': {}", tz, id, e))
                     }
                 })
-                .transpose()?;
+                .transpose()?
+                .or(Some(timezone.clone()));
 
             Ok(Job {
                 id,
@@ -197,6 +211,8 @@ pub fn parse_config(content: &str) -> Result<(RunnerConfig, Vec<Job>)> {
                 jitter,
                 enabled: job.enabled.unwrap_or(true),
                 timezone: job_timezone,
+                env_file: job.env_file,
+                env: job.env,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -614,8 +630,8 @@ jobs:
   job1:
     schedule:
       cron: "* * * * *"
+      timezone: America/New_York
     run: echo test
-    timezone: America/New_York
   job2:
     schedule:
       cron: "* * * * *"
@@ -628,7 +644,10 @@ jobs:
             find("job1").timezone,
             Some(TimezoneConfig::Named(chrono_tz::America::New_York))
         );
-        assert!(find("job2").timezone.is_none());
+        assert_eq!(
+            find("job2").timezone,
+            Some(TimezoneConfig::Named(chrono_tz::Asia::Tokyo))
+        );
     }
 
     #[test]
@@ -638,8 +657,8 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
+      timezone: inherit
     run: echo test
-    timezone: inherit
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert_eq!(jobs[0].timezone, Some(TimezoneConfig::Inherit));
@@ -652,9 +671,104 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
+      timezone: Invalid/Zone
     run: echo test
-    timezone: Invalid/Zone
 "#;
         assert!(parse_config(yaml).is_err());
+    }
+
+    #[test]
+    fn parse_runner_env() {
+        let yaml = r#"
+runner:
+  env:
+    FOO: bar
+    BAZ: qux
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+"#;
+        let (runner, _) = parse_config(yaml).unwrap();
+        let env = runner.env.as_ref().unwrap();
+        assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
+        assert_eq!(env.get("BAZ"), Some(&"qux".to_string()));
+    }
+
+    #[test]
+    fn parse_runner_env_file() {
+        let yaml = r#"
+runner:
+  env_file: .env.global
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+"#;
+        let (runner, _) = parse_config(yaml).unwrap();
+        assert_eq!(runner.env_file.as_deref(), Some(".env.global"));
+    }
+
+    #[test]
+    fn parse_job_env() {
+        let yaml = r#"
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+    env:
+      KEY1: value1
+      KEY2: value2
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        let env = jobs[0].env.as_ref().unwrap();
+        assert_eq!(env.get("KEY1"), Some(&"value1".to_string()));
+        assert_eq!(env.get("KEY2"), Some(&"value2".to_string()));
+    }
+
+    #[test]
+    fn parse_job_env_file() {
+        let yaml = r#"
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+    env_file: .env.job
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs[0].env_file.as_deref(), Some(".env.job"));
+    }
+
+    #[test]
+    fn parse_full_env_config() {
+        let yaml = r#"
+runner:
+  env_file: .env.global
+  env:
+    GLOBAL_VAR: global_value
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+    env_file: .env.local
+    env:
+      LOCAL_VAR: local_value
+"#;
+        let (runner, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(runner.env_file.as_deref(), Some(".env.global"));
+        assert_eq!(
+            runner.env.as_ref().unwrap().get("GLOBAL_VAR"),
+            Some(&"global_value".to_string())
+        );
+        assert_eq!(jobs[0].env_file.as_deref(), Some(".env.local"));
+        assert_eq!(
+            jobs[0].env.as_ref().unwrap().get("LOCAL_VAR"),
+            Some(&"local_value".to_string())
+        );
     }
 }

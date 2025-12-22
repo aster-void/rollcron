@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::sleep;
 
-use crate::config::Job;
+use crate::config::{Job, RunnerConfig};
 use crate::env;
 use crate::git;
 
@@ -30,7 +31,7 @@ pub fn resolve_work_dir(sot_path: &PathBuf, job_id: &str, working_dir: &Option<S
     }
 }
 
-pub async fn execute_job(job: &Job, work_dir: &PathBuf) {
+pub async fn execute_job(job: &Job, work_dir: &PathBuf, sot_path: &PathBuf, runner: &RunnerConfig) {
     let tag = format!("[job:{}]", job.id);
 
     // Apply task jitter before first execution
@@ -56,7 +57,7 @@ pub async fn execute_job(job: &Job, work_dir: &PathBuf) {
         println!("{} Starting '{}'", tag, job.name);
         println!("{}   command: {}", tag, job.command);
 
-        let result = run_command(job, work_dir).await;
+        let result = run_command(job, work_dir, sot_path, runner).await;
         let success = handle_result(&tag, job, &result);
 
         if success {
@@ -69,12 +70,13 @@ pub async fn execute_job(job: &Job, work_dir: &PathBuf) {
     }
 }
 
-async fn run_command(job: &Job, work_dir: &PathBuf) -> CommandResult {
-    // Load .env file if it exists
-    let env_vars = match env::load_env_file(work_dir) {
+async fn run_command(job: &Job, work_dir: &PathBuf, sot_path: &PathBuf, runner: &RunnerConfig) -> CommandResult {
+    // Merge environment variables in priority order:
+    // host ENV < runner.env_file < runner.env < job.env_file < job.env
+    let env_vars = match merge_env_vars(job, work_dir, sot_path, runner) {
         Ok(vars) => vars,
         Err(e) => {
-            return CommandResult::ExecError(format!("Failed to load .env file: {}", e));
+            return CommandResult::ExecError(format!("Failed to load environment: {}", e));
         }
     };
 
@@ -85,7 +87,7 @@ async fn run_command(job: &Job, work_dir: &PathBuf) -> CommandResult {
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
-    // Apply environment variables from .env file
+    // Apply environment variables
     for (key, value) in env_vars {
         cmd.env(key, value);
     }
@@ -102,6 +104,41 @@ async fn run_command(job: &Job, work_dir: &PathBuf) -> CommandResult {
         Ok(Err(e)) => CommandResult::ExecError(e.to_string()),
         Err(_) => CommandResult::Timeout,
     }
+}
+
+fn merge_env_vars(
+    job: &Job,
+    work_dir: &PathBuf,
+    sot_path: &PathBuf,
+    runner: &RunnerConfig,
+) -> anyhow::Result<HashMap<String, String>> {
+    let mut env_vars = HashMap::new();
+
+    // 1. Start with runner.env_file (loaded from sot_path)
+    if let Some(env_file_path) = &runner.env_file {
+        let full_path = sot_path.join(env_file_path);
+        let vars = env::load_env_from_path(&full_path)?;
+        env_vars.extend(vars);
+    }
+
+    // 2. Merge runner.env
+    if let Some(runner_env) = &runner.env {
+        env_vars.extend(runner_env.clone());
+    }
+
+    // 3. Merge job.env_file (loaded from work_dir)
+    if let Some(env_file_path) = &job.env_file {
+        let full_path = work_dir.join(env_file_path);
+        let vars = env::load_env_from_path(&full_path)?;
+        env_vars.extend(vars);
+    }
+
+    // 4. Merge job.env
+    if let Some(job_env) = &job.env {
+        env_vars.extend(job_env.clone());
+    }
+
+    Ok(env_vars)
 }
 
 enum CommandResult {
@@ -154,7 +191,7 @@ fn handle_result(tag: &str, job: &Job, result: &CommandResult) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Concurrency, RetryConfig};
+    use crate::config::{Concurrency, RetryConfig, TimezoneConfig};
     use cron::Schedule;
     use std::str::FromStr;
     use tempfile::tempdir;
@@ -172,6 +209,16 @@ mod tests {
             jitter: None,
             enabled: true,
             timezone: None,
+            env_file: None,
+            env: None,
+        }
+    }
+
+    fn make_runner() -> RunnerConfig {
+        RunnerConfig {
+            timezone: TimezoneConfig::Utc,
+            env_file: None,
+            env: None,
         }
     }
 
@@ -179,14 +226,16 @@ mod tests {
     async fn execute_simple_job() {
         let job = make_job("echo test", 10);
         let dir = tempdir().unwrap();
-        execute_job(&job, &dir.path().to_path_buf()).await;
+        let runner = make_runner();
+        execute_job(&job, &dir.path().to_path_buf(), &dir.path().to_path_buf(), &runner).await;
     }
 
     #[tokio::test]
     async fn job_timeout() {
         let job = make_job("sleep 10", 1);
         let dir = tempdir().unwrap();
-        execute_job(&job, &dir.path().to_path_buf()).await;
+        let runner = make_runner();
+        execute_job(&job, &dir.path().to_path_buf(), &dir.path().to_path_buf(), &runner).await;
     }
 
     #[tokio::test]
@@ -198,8 +247,9 @@ mod tests {
             jitter: None,
         });
         let dir = tempdir().unwrap();
+        let runner = make_runner();
         let start = std::time::Instant::now();
-        execute_job(&job, &dir.path().to_path_buf()).await;
+        execute_job(&job, &dir.path().to_path_buf(), &dir.path().to_path_buf(), &runner).await;
         assert!(start.elapsed() >= Duration::from_millis(30));
     }
 
@@ -212,8 +262,9 @@ mod tests {
             jitter: None,
         });
         let dir = tempdir().unwrap();
+        let runner = make_runner();
         let start = std::time::Instant::now();
-        execute_job(&job, &dir.path().to_path_buf()).await;
+        execute_job(&job, &dir.path().to_path_buf(), &dir.path().to_path_buf(), &runner).await;
         assert!(start.elapsed() < Duration::from_millis(100));
     }
 
@@ -222,8 +273,9 @@ mod tests {
         let mut job = make_job("echo ok", 10);
         job.jitter = Some(Duration::from_millis(50));
         let dir = tempdir().unwrap();
+        let runner = make_runner();
         let start = std::time::Instant::now();
-        execute_job(&job, &dir.path().to_path_buf()).await;
+        execute_job(&job, &dir.path().to_path_buf(), &dir.path().to_path_buf(), &runner).await;
         assert!(start.elapsed() < Duration::from_secs(1));
     }
 
@@ -234,14 +286,104 @@ mod tests {
         std::fs::write(&env_path, "TEST_VAR=hello\nOTHER_VAR=world").unwrap();
 
         let job = make_job("echo $TEST_VAR $OTHER_VAR", 10);
-        execute_job(&job, &dir.path().to_path_buf()).await;
+        let runner = make_runner();
+        execute_job(&job, &dir.path().to_path_buf(), &dir.path().to_path_buf(), &runner).await;
     }
 
     #[tokio::test]
     async fn job_without_env_file() {
         let dir = tempdir().unwrap();
-        // No .env file created - should work fine
+        let runner = make_runner();
         let job = make_job("echo no env file", 10);
-        execute_job(&job, &dir.path().to_path_buf()).await;
+        execute_job(&job, &dir.path().to_path_buf(), &dir.path().to_path_buf(), &runner).await;
+    }
+
+    #[tokio::test]
+    async fn job_with_runner_env() {
+        let dir = tempdir().unwrap();
+        let job = make_job("echo $RUNNER_VAR", 10);
+        let mut runner = make_runner();
+        let mut env = HashMap::new();
+        env.insert("RUNNER_VAR".to_string(), "from_runner".to_string());
+        runner.env = Some(env);
+        execute_job(&job, &dir.path().to_path_buf(), &dir.path().to_path_buf(), &runner).await;
+    }
+
+    #[tokio::test]
+    async fn job_with_job_env() {
+        let dir = tempdir().unwrap();
+        let mut job = make_job("echo $JOB_VAR", 10);
+        let mut env = HashMap::new();
+        env.insert("JOB_VAR".to_string(), "from_job".to_string());
+        job.env = Some(env);
+        let runner = make_runner();
+        execute_job(&job, &dir.path().to_path_buf(), &dir.path().to_path_buf(), &runner).await;
+    }
+
+    #[tokio::test]
+    async fn job_env_priority() {
+        let dir = tempdir().unwrap();
+
+        // Create runner.env_file
+        let runner_env_file = dir.path().join("runner.env");
+        std::fs::write(&runner_env_file, "VAR=from_runner_file").unwrap();
+
+        // Create job.env_file
+        let job_env_file = dir.path().join("job.env");
+        std::fs::write(&job_env_file, "VAR=from_job_file").unwrap();
+
+        let mut runner = make_runner();
+        runner.env_file = Some("runner.env".to_string());
+        let mut runner_env = HashMap::new();
+        runner_env.insert("VAR".to_string(), "from_runner_env".to_string());
+        runner.env = Some(runner_env);
+
+        let mut job = make_job("echo $VAR", 10);
+        job.env_file = Some("job.env".to_string());
+        let mut job_env = HashMap::new();
+        job_env.insert("VAR".to_string(), "from_job_env".to_string());
+        job.env = Some(job_env);
+
+        // Priority: host < runner.env_file < runner.env < job.env_file < job.env
+        // Expected: job.env should win
+        execute_job(&job, &dir.path().to_path_buf(), &dir.path().to_path_buf(), &runner).await;
+    }
+
+    #[test]
+    fn test_merge_env_vars_priority() {
+        let dir = tempdir().unwrap();
+
+        // Create runner.env_file
+        let runner_env_file = dir.path().join("runner.env");
+        std::fs::write(&runner_env_file, "VAR1=from_runner_file\nVAR2=from_runner_file\nVAR3=from_runner_file\nVAR4=from_runner_file").unwrap();
+
+        // Create job.env_file
+        let job_env_file = dir.path().join("job.env");
+        std::fs::write(&job_env_file, "VAR3=from_job_file\nVAR4=from_job_file").unwrap();
+
+        let mut runner = make_runner();
+        runner.env_file = Some("runner.env".to_string());
+        let mut runner_env = HashMap::new();
+        runner_env.insert("VAR2".to_string(), "from_runner_env".to_string());
+        runner_env.insert("VAR3".to_string(), "from_runner_env".to_string());
+        runner_env.insert("VAR4".to_string(), "from_runner_env".to_string());
+        runner.env = Some(runner_env);
+
+        let mut job = make_job("echo test", 10);
+        job.env_file = Some("job.env".to_string());
+        let mut job_env = HashMap::new();
+        job_env.insert("VAR4".to_string(), "from_job_env".to_string());
+        job.env = Some(job_env);
+
+        let result = merge_env_vars(&job, &dir.path().to_path_buf(), &dir.path().to_path_buf(), &runner).unwrap();
+
+        // VAR1: only in runner.env_file
+        assert_eq!(result.get("VAR1"), Some(&"from_runner_file".to_string()));
+        // VAR2: in runner.env_file (overridden by runner.env)
+        assert_eq!(result.get("VAR2"), Some(&"from_runner_env".to_string()));
+        // VAR3: in runner.env_file, runner.env (overridden by job.env_file)
+        assert_eq!(result.get("VAR3"), Some(&"from_job_file".to_string()));
+        // VAR4: in all layers (job.env wins)
+        assert_eq!(result.get("VAR4"), Some(&"from_job_env".to_string()));
     }
 }

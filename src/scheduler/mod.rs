@@ -226,9 +226,11 @@ impl Scheduler {
         let job_id = job.id.clone();
         let job_id_for_log = job.id.clone();
         let work_dir = resolve_work_dir(&self.sot_path, &job.id, &job.working_dir);
+        let sot_path = self.sot_path.clone();
+        let runner = self.runner.clone();
 
         let handle = tokio::spawn(async move {
-            execute_job(&job, &work_dir).await;
+            execute_job(&job, &work_dir, &sot_path, &runner).await;
             if let Err(e) = addr.send(JobCompleted).await {
                 eprintln!("[job:{}] Failed to notify completion: {}", job_id_for_log, e);
             }
