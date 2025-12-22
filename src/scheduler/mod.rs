@@ -20,6 +20,7 @@ pub struct Scheduler {
     runner: RunnerConfig,
     pending_syncs: HashSet<String>,
     job_handles: HashMap<String, Vec<JoinHandle<()>>>,
+    tick_handle: Option<JoinHandle<()>>,
 }
 
 impl Scheduler {
@@ -30,6 +31,7 @@ impl Scheduler {
             runner,
             pending_syncs: HashSet::new(),
             job_handles: HashMap::new(),
+            tick_handle: None,
         }
     }
 
@@ -63,7 +65,7 @@ impl Actor for Scheduler {
 
     async fn started(&mut self, mailbox: &Mailbox<Self>) -> Result<(), Self::Stop> {
         let addr = mailbox.address();
-        tokio::spawn(async move {
+        self.tick_handle = Some(tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
@@ -71,11 +73,22 @@ impl Actor for Scheduler {
                     break;
                 }
             }
-        });
+        }));
         Ok(())
     }
 
-    async fn stopped(self) -> Self::Stop {}
+    async fn stopped(mut self) -> Self::Stop {
+        // Abort tick timer
+        if let Some(handle) = self.tick_handle.take() {
+            handle.abort();
+        }
+        // Abort all running jobs
+        for (_, handles) in self.job_handles.drain() {
+            for handle in handles {
+                handle.abort();
+            }
+        }
+    }
 }
 
 // === Messages ===
@@ -205,11 +218,14 @@ impl Scheduler {
 
     fn spawn_job(&mut self, job: Job, addr: Address<Scheduler, Weak>) {
         let job_id = job.id.clone();
+        let job_id_for_log = job.id.clone();
         let work_dir = resolve_work_dir(&self.sot_path, &job.id, &job.working_dir);
 
         let handle = tokio::spawn(async move {
             execute_job(&job, &work_dir).await;
-            let _ = addr.send(JobCompleted).await;
+            if let Err(e) = addr.send(JobCompleted).await {
+                eprintln!("[job:{}] Failed to notify completion: {}", job_id_for_log, e);
+            }
         });
 
         self.job_handles.entry(job_id).or_default().push(handle);

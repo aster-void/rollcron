@@ -2,7 +2,7 @@ mod config;
 mod git;
 mod scheduler;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use scheduler::{ConfigUpdate, Scheduler, SyncRequest};
 use std::path::PathBuf;
@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
         PathBuf::from(&args.repo)
             .canonicalize()?
             .to_str()
-            .unwrap()
+            .context("Path contains invalid UTF-8")?
             .to_string()
     } else {
         args.repo.clone()
@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
     let source_clone = source.clone();
     let pull_interval = args.pull_interval;
     let scheduler_clone = scheduler.clone();
-    tokio::spawn(async move {
+    let sync_handle = tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(pull_interval));
         loop {
             ticker.tick().await;
@@ -106,9 +106,18 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Keep main alive while scheduler runs
-    // The scheduler actor runs indefinitely with its internal ticker
-    std::future::pending::<()>().await;
+    // Wait for shutdown signal or task panic
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            println!("[rollcron] Shutting down...");
+        }
+        result = sync_handle => {
+            match result {
+                Ok(()) => eprintln!("[rollcron] Sync task exited unexpectedly"),
+                Err(e) => eprintln!("[rollcron] Sync task panicked: {}", e),
+            }
+        }
+    }
 
     Ok(())
 }
