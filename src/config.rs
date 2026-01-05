@@ -125,6 +125,31 @@ pub struct RetryConfig {
     pub jitter: Option<Duration>,
 }
 
+/// Normalize 5-field cron expression for compatibility with cron crate.
+/// Converts day-of-week 0 (Sunday in POSIX) to 7 (Sunday in cron crate).
+fn normalize_cron(cron: &str) -> String {
+    let fields: Vec<&str> = cron.split_whitespace().collect();
+    if fields.len() != 5 {
+        return cron.to_string();
+    }
+
+    // Day-of-week is the 5th field (index 4)
+    // Replace standalone "0" with "7" for Sunday
+    let dow = fields[4]
+        .replace(",0,", ",7,")
+        .replace(",0", ",7")
+        .replace("0,", "7,")
+        .replace("0-", "7-");
+
+    // Handle standalone "0"
+    let dow = if dow == "0" { "7".to_string() } else { dow };
+
+    format!(
+        "{} {} {} {} {}",
+        fields[0], fields[1], fields[2], fields[3], dow
+    )
+}
+
 pub fn parse_config(content: &str) -> Result<(RunnerConfig, Vec<Job>)> {
     let config: Config = serde_yaml::from_str(content)
         .map_err(|e| anyhow!("Failed to parse YAML: {}", e))?;
@@ -150,7 +175,10 @@ pub fn parse_config(content: &str) -> Result<(RunnerConfig, Vec<Job>)> {
         .map(|(id, job)| {
             validate_job_id(&id)?;
 
-            let schedule_str = format!("{} *", job.schedule.cron);
+            // Convert 5-field cron to 6-field by prepending seconds (0)
+            // Also normalize day-of-week: 0 → 7 (cron crate uses 1-7, not 0-6)
+            let normalized_cron = normalize_cron(&job.schedule.cron);
+            let schedule_str = format!("0 {}", normalized_cron);
             let schedule = Schedule::from_str(&schedule_str)
                 .map_err(|e| anyhow!("Invalid cron '{}' in job '{}': {}", job.schedule.cron, id, e))?;
 
@@ -254,6 +282,21 @@ jobs:
         assert_eq!(jobs[0].name, "hello");
         assert_eq!(jobs[0].command, "echo hello");
         assert_eq!(jobs[0].timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn parse_cron_with_day_of_week() {
+        // Regression test: 5-field cron with day-of-week should parse correctly
+        let yaml = r#"
+jobs:
+  weekly:
+    schedule:
+      cron: "0 7 * * 0"
+    run: echo sunday
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, "weekly");
     }
 
     #[test]
