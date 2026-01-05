@@ -2,6 +2,30 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// RAII guard that removes a directory on drop unless disarmed.
+struct TempDirGuard<'a> {
+    path: &'a Path,
+    keep: bool,
+}
+
+impl<'a> TempDirGuard<'a> {
+    fn new(path: &'a Path) -> Self {
+        Self { path, keep: false }
+    }
+
+    fn disarm(&mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for TempDirGuard<'_> {
+    fn drop(&mut self) {
+        if !self.keep && self.path.exists() {
+            let _ = std::fs::remove_dir_all(self.path);
+        }
+    }
+}
+
 /// Ensures repo is cloned/synced to cache. Returns (cache path, commit_range if updated).
 pub fn ensure_repo(source: &str) -> Result<(PathBuf, Option<String>)> {
     let cache_dir = get_cache_dir(source)?;
@@ -41,6 +65,7 @@ fn sync_repo(dest: &Path) -> Result<Option<String>> {
     let has_upstream = Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "@{upstream}"])
         .current_dir(dest)
+        .env("LC_ALL", "C") // Ensure consistent English output
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
@@ -49,6 +74,7 @@ fn sync_repo(dest: &Path) -> Result<Option<String>> {
         let output = Command::new("git")
             .args(["pull", "--ff-only"])
             .current_dir(dest)
+            .env("LC_ALL", "C") // Ensure consistent English output
             .output()?;
 
         if !output.status.success() {
@@ -129,6 +155,9 @@ pub fn sync_to_job_dir(sot_path: &Path, job_dir: &Path) -> Result<()> {
     }
     std::fs::create_dir_all(&temp_dir)?;
 
+    // RAII guard ensures temp_dir is cleaned up on any error path
+    let mut temp_guard = TempDirGuard::new(&temp_dir);
+
     // Use git archive for all repos (both local and remote use git clone now)
     let archive = Command::new("git")
         .args(["archive", "HEAD"])
@@ -136,7 +165,7 @@ pub fn sync_to_job_dir(sot_path: &Path, job_dir: &Path) -> Result<()> {
         .output()?;
 
     if !archive.status.success() {
-        std::fs::remove_dir_all(&temp_dir)?;
+        // temp_guard will clean up on drop
         let stderr = String::from_utf8_lossy(&archive.stderr);
         anyhow::bail!("git archive failed: {}", stderr);
     }
@@ -159,17 +188,38 @@ pub fn sync_to_job_dir(sot_path: &Path, job_dir: &Path) -> Result<()> {
 
     let status = extract.wait()?;
     if !status.success() {
-        std::fs::remove_dir_all(&temp_dir)?;
+        // temp_guard will clean up on drop
         anyhow::bail!("tar extraction failed with exit code: {:?}", status.code());
     }
 
-    // Atomic swap: remove old, rename temp to target
-    if job_dir.exists() {
-        std::fs::remove_dir_all(job_dir)?;
+    // Disarm the guard before rename - we'll handle cleanup manually from here
+    temp_guard.disarm();
+
+    // Safe swap: rename old to backup, rename temp to target, then remove backup.
+    // This minimizes the window where job_dir doesn't exist.
+    let backup_dir = job_dir.with_extension("old");
+
+    // Clean up any leftover backup directory
+    if backup_dir.exists() {
+        let _ = std::fs::remove_dir_all(&backup_dir);
     }
+
+    if job_dir.exists() {
+        // Move existing to backup first
+        std::fs::rename(job_dir, &backup_dir).with_context(|| {
+            format!("Failed to rename {} to backup", job_dir_str)
+        })?;
+    }
+
+    // Move new directory into place
     std::fs::rename(&temp_dir, job_dir).with_context(|| {
         format!("Failed to rename {} to {}", temp_dir_str, job_dir_str)
     })?;
+
+    // Remove backup (ignore errors as it's cleanup)
+    if backup_dir.exists() {
+        let _ = std::fs::remove_dir_all(&backup_dir);
+    }
 
     Ok(())
 }

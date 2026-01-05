@@ -192,14 +192,11 @@ impl Scheduler {
                         "{} Waiting for {} previous run(s) to complete",
                         tag, running_count
                     );
-                    if let Some(handles) = self.job_handles.remove(&job.id) {
-                        for handle in handles {
-                            let _ = handle.await;
-                        }
-                    }
-                    self.cleanup_finished_handles(&job.id);
+                    // Spawn waiting job asynchronously to avoid blocking the actor
+                    self.spawn_waiting_job(job, addr);
+                } else {
+                    self.spawn_job(job, addr);
                 }
-                self.spawn_job(job, addr);
             }
             Concurrency::Skip => {
                 if running_count > 0 {
@@ -238,6 +235,34 @@ impl Scheduler {
 
         self.job_handles.entry(job_id).or_default().push(handle);
     }
+
+    /// Spawn a job that waits for previous runs to complete before executing.
+    /// This avoids blocking the actor by spawning a separate task that handles the waiting.
+    fn spawn_waiting_job(&mut self, job: Job, addr: Address<Scheduler, Weak>) {
+        let job_id = job.id.clone();
+        let job_id_for_log = job.id.clone();
+        let work_dir = resolve_work_dir(&self.sot_path, &job.id, &job.working_dir);
+        let sot_path = self.sot_path.clone();
+        let runner = self.runner.clone();
+
+        // Take ownership of existing handles to wait on them
+        let previous_handles = self.job_handles.remove(&job.id).unwrap_or_default();
+
+        let handle = tokio::spawn(async move {
+            // Wait for all previous runs to complete
+            for prev_handle in previous_handles {
+                let _ = prev_handle.await;
+            }
+
+            // Now execute the new job
+            execute_job(&job, &work_dir, &sot_path, &runner).await;
+            if let Err(e) = addr.send(JobCompleted).await {
+                eprintln!("[job:{}] Failed to notify completion: {}", job_id_for_log, e);
+            }
+        });
+
+        self.job_handles.entry(job_id).or_default().push(handle);
+    }
 }
 
 // === Helper Functions ===
@@ -252,7 +277,9 @@ where
     let now = Utc::now().with_timezone(&tz);
     if let Some(next) = schedule.upcoming(tz).next() {
         let until_next = (next - now).num_milliseconds();
-        until_next <= SCHEDULE_TOLERANCE_MS && until_next >= 0
+        // Allow jobs to be triggered slightly after their scheduled time
+        // (e.g., due to minor clock drift or processing delay)
+        until_next <= SCHEDULE_TOLERANCE_MS && until_next >= -SCHEDULE_TOLERANCE_MS
     } else {
         false
     }

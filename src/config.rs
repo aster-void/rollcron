@@ -168,20 +168,61 @@ fn normalize_cron(cron: &str) -> String {
     }
 
     // Day-of-week is the 5th field (index 4)
-    // Replace standalone "0" with "7" for Sunday
-    let dow = fields[4]
-        .replace(",0,", ",7,")
-        .replace(",0", ",7")
-        .replace("0,", "7,")
-        .replace("0-", "7-");
-
-    // Handle standalone "0"
-    let dow = if dow == "0" { "7".to_string() } else { dow };
+    // Parse each element properly to avoid false replacements (e.g., "10" -> "17")
+    let dow = normalize_dow_field(fields[4]);
 
     format!(
         "{} {} {} {} {}",
         fields[0], fields[1], fields[2], fields[3], dow
     )
+}
+
+/// Normalize a single day-of-week field, converting 0 (POSIX Sunday) to 7 (cron crate Sunday).
+fn normalize_dow_field(field: &str) -> String {
+    // Handle special cases
+    if field == "*" || field == "?" {
+        return field.to_string();
+    }
+
+    // Split by comma for lists (e.g., "0,3,5")
+    field
+        .split(',')
+        .map(|part| normalize_dow_part(part))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Normalize a single part of a day-of-week field (handles ranges like "0-6" and steps like "0/2").
+fn normalize_dow_part(part: &str) -> String {
+    // Handle step values (e.g., "0/2" or "0-6/2")
+    if let Some((range_part, step)) = part.split_once('/') {
+        let normalized_range = normalize_dow_range(range_part);
+        return format!("{}/{}", normalized_range, step);
+    }
+
+    normalize_dow_range(part)
+}
+
+/// Normalize a range or single value (e.g., "0", "0-6").
+fn normalize_dow_range(part: &str) -> String {
+    // Handle ranges (e.g., "0-6")
+    if let Some((start, end)) = part.split_once('-') {
+        let start_normalized = normalize_dow_value(start);
+        let end_normalized = normalize_dow_value(end);
+        return format!("{}-{}", start_normalized, end_normalized);
+    }
+
+    // Single value
+    normalize_dow_value(part)
+}
+
+/// Normalize a single day-of-week value: "0" -> "7", others unchanged.
+fn normalize_dow_value(val: &str) -> String {
+    if val == "0" {
+        "7".to_string()
+    } else {
+        val.to_string()
+    }
 }
 
 pub fn parse_config(content: &str) -> Result<(RunnerConfig, Vec<Job>)> {
@@ -947,5 +988,27 @@ jobs:
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert_eq!(jobs[0].webhook.len(), 3);
+    }
+
+    #[test]
+    fn test_normalize_dow_field() {
+        // Standalone 0 -> 7
+        assert_eq!(normalize_dow_field("0"), "7");
+        // Other values unchanged
+        assert_eq!(normalize_dow_field("1"), "1");
+        assert_eq!(normalize_dow_field("*"), "*");
+        assert_eq!(normalize_dow_field("?"), "?");
+        // List with 0
+        assert_eq!(normalize_dow_field("0,3,5"), "7,3,5");
+        assert_eq!(normalize_dow_field("1,0,3"), "1,7,3");
+        // Range starting with 0
+        assert_eq!(normalize_dow_field("0-6"), "7-6");
+        // Step value
+        assert_eq!(normalize_dow_field("0/2"), "7/2");
+        assert_eq!(normalize_dow_field("0-6/2"), "7-6/2");
+        // Values that should NOT be affected (regression test for "10" -> "17" bug)
+        assert_eq!(normalize_dow_field("10"), "10"); // Invalid but should not be mangled
+        assert_eq!(normalize_dow_field("1-5"), "1-5");
+        assert_eq!(normalize_dow_field("20"), "20"); // Invalid but should not be mangled
     }
 }
