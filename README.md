@@ -114,6 +114,8 @@ Jobs can access environment variables from multiple sources. Variables are merge
 4. `runner.env_file` - Global .env file (relative to repo root)
 5. Host environment - Inherited from the system
 
+**Shell Expansion**: Paths (`env_file`, `working_dir`) and env values support `~` (home directory) and `$VAR` / `${VAR}` (environment variables).
+
 Example:
 
 ```yaml

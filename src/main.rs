@@ -28,15 +28,16 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Canonicalize local paths
-    let source = if args.repo.starts_with('/') || args.repo.starts_with('.') {
-        PathBuf::from(&args.repo)
+    // Expand shell variables (~, $VAR) and canonicalize local paths
+    let expanded_repo = env::expand_string(&args.repo);
+    let source = if expanded_repo.starts_with('/') || expanded_repo.starts_with('.') {
+        PathBuf::from(&expanded_repo)
             .canonicalize()?
             .to_str()
             .context("Path contains invalid UTF-8")?
             .to_string()
     } else {
-        args.repo.clone()
+        expanded_repo
     };
 
     println!("[rollcron] Source: {}", source);

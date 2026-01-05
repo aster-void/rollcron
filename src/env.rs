@@ -2,6 +2,15 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Expand shell-like variables in a string.
+/// Supports ~ (home directory) and $VAR / ${VAR} (environment variables).
+/// Returns the original string if expansion fails.
+pub fn expand_string(s: &str) -> String {
+    shellexpand::full(s)
+        .map(|c| c.into_owned())
+        .unwrap_or_else(|_| s.to_string())
+}
+
 /// Load environment variables from .env file if it exists.
 /// Returns a HashMap of key-value pairs.
 /// If the .env file doesn't exist, returns an empty HashMap (no error).
@@ -114,5 +123,33 @@ mod tests {
         let env_path = dir.path().join("missing.env");
         let vars = load_env_from_path(&env_path).unwrap();
         assert!(vars.is_empty());
+    }
+
+    #[test]
+    fn test_expand_string_tilde() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(expand_string("~/foo"), format!("{}/foo", home));
+    }
+
+    #[test]
+    fn test_expand_string_env_var() {
+        // SAFETY: Test is single-threaded and var is unique
+        unsafe { std::env::set_var("TEST_EXPAND_VAR", "hello") };
+        assert_eq!(expand_string("$TEST_EXPAND_VAR"), "hello");
+        assert_eq!(expand_string("${TEST_EXPAND_VAR}"), "hello");
+        unsafe { std::env::remove_var("TEST_EXPAND_VAR") };
+    }
+
+    #[test]
+    fn test_expand_string_no_expansion() {
+        assert_eq!(expand_string("plain text"), "plain text");
+        assert_eq!(expand_string("/absolute/path"), "/absolute/path");
+    }
+
+    #[test]
+    fn test_expand_string_undefined_var() {
+        // Undefined variables are kept as-is (no error)
+        let result = expand_string("$UNDEFINED_VAR_12345");
+        assert!(result.contains("UNDEFINED") || result.is_empty());
     }
 }

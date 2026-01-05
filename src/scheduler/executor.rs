@@ -14,7 +14,8 @@ pub fn resolve_work_dir(sot_path: &PathBuf, job_id: &str, working_dir: &Option<S
     let job_dir = git::get_job_dir(sot_path, job_id);
     match working_dir {
         Some(dir) => {
-            let work_path = job_dir.join(dir);
+            let expanded = env::expand_string(dir);
+            let work_path = job_dir.join(&expanded);
             // Canonicalize to resolve .. and symlinks, then verify path is within job_dir
             match (work_path.canonicalize(), job_dir.canonicalize()) {
                 (Ok(resolved), Ok(base)) if resolved.starts_with(&base) => resolved,
@@ -116,26 +117,32 @@ fn merge_env_vars(
 
     // 1. Start with runner.env_file (loaded from sot_path)
     if let Some(env_file_path) = &runner.env_file {
-        let full_path = sot_path.join(env_file_path);
+        let expanded = env::expand_string(env_file_path);
+        let full_path = sot_path.join(&expanded);
         let vars = env::load_env_from_path(&full_path)?;
         env_vars.extend(vars);
     }
 
-    // 2. Merge runner.env
+    // 2. Merge runner.env (with shell expansion on values)
     if let Some(runner_env) = &runner.env {
-        env_vars.extend(runner_env.clone());
+        for (k, v) in runner_env {
+            env_vars.insert(k.clone(), env::expand_string(v));
+        }
     }
 
     // 3. Merge job.env_file (loaded from work_dir)
     if let Some(env_file_path) = &job.env_file {
-        let full_path = work_dir.join(env_file_path);
+        let expanded = env::expand_string(env_file_path);
+        let full_path = work_dir.join(&expanded);
         let vars = env::load_env_from_path(&full_path)?;
         env_vars.extend(vars);
     }
 
-    // 4. Merge job.env
+    // 4. Merge job.env (with shell expansion on values)
     if let Some(job_env) = &job.env {
-        env_vars.extend(job_env.clone());
+        for (k, v) in job_env {
+            env_vars.insert(k.clone(), env::expand_string(v));
+        }
     }
 
     Ok(env_vars)
