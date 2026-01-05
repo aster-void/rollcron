@@ -101,8 +101,8 @@ pub async fn execute_job(job: &Job, work_dir: &PathBuf, sot_path: &PathBuf, runn
         }
     }
 
-    // All retries exhausted - send webhook notification if configured
-    if let Some(webhook_url) = &job.webhook {
+    // All retries exhausted - send webhook notifications if configured
+    if !job.webhook.is_empty() {
         let (error, stderr) = match &last_result {
             Some(CommandResult::Completed(output)) => {
                 let err = format!("exit code {:?}", output.status.code());
@@ -123,7 +123,9 @@ pub async fn execute_job(job: &Job, work_dir: &PathBuf, sot_path: &PathBuf, runn
             attempts: max_attempts,
         };
 
-        send_webhook(webhook_url, &payload).await;
+        for webhook in &job.webhook {
+            send_webhook(&webhook.to_url(), &payload).await;
+        }
     }
 }
 
@@ -274,7 +276,7 @@ mod tests {
             timezone: None,
             env_file: None,
             env: None,
-            webhook: None,
+            webhook: vec![],
         }
     }
 
@@ -283,7 +285,7 @@ mod tests {
             timezone: TimezoneConfig::Utc,
             env_file: None,
             env: None,
-            webhook: None,
+            webhook: vec![],
         }
     }
 

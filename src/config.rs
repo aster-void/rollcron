@@ -30,12 +30,40 @@ pub enum TimezoneConfig {
     Named(Tz),
 }
 
+/// Webhook configuration - either a URL or Discord id/token pair
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum WebhookConfig {
+    Url { url: String },
+    Discord { id: String, token: String },
+}
+
+impl WebhookConfig {
+    /// Convert to URL string, expanding environment variables
+    pub fn to_url(&self) -> String {
+        match self {
+            WebhookConfig::Url { url } => shellexpand::full(url)
+                .map(|s| s.into_owned())
+                .unwrap_or_else(|_| url.clone()),
+            WebhookConfig::Discord { id, token } => {
+                let id = shellexpand::full(id)
+                    .map(|s| s.into_owned())
+                    .unwrap_or_else(|_| id.clone());
+                let token = shellexpand::full(token)
+                    .map(|s| s.into_owned())
+                    .unwrap_or_else(|_| token.clone());
+                format!("https://discord.com/api/webhooks/{}/{}", id, token)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RunnerConfig {
     pub timezone: TimezoneConfig,
     pub env_file: Option<String>,
     pub env: Option<HashMap<String, String>>,
-    pub webhook: Option<String>,
+    pub webhook: Vec<WebhookConfig>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -43,7 +71,8 @@ struct RunnerConfigRaw {
     timezone: Option<String>,
     env_file: Option<String>,
     env: Option<HashMap<String, String>>,
-    webhook: Option<String>,
+    #[serde(default)]
+    webhook: Vec<WebhookConfig>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -78,7 +107,8 @@ pub struct JobConfig {
     pub enabled: Option<bool>,
     pub env_file: Option<String>,
     pub env: Option<HashMap<String, String>>,
-    pub webhook: Option<String>,
+    #[serde(default)]
+    pub webhook: Vec<WebhookConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,7 +149,7 @@ pub struct Job {
     pub timezone: Option<TimezoneConfig>,
     pub env_file: Option<String>,
     pub env: Option<HashMap<String, String>>,
-    pub webhook: Option<String>,
+    pub webhook: Vec<WebhookConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -235,8 +265,9 @@ pub fn parse_config(content: &str) -> Result<(RunnerConfig, Vec<Job>)> {
                 .transpose()?
                 .or(Some(timezone.clone()));
 
-            // Job webhook overrides runner webhook
-            let webhook = job.webhook.or_else(|| runner_webhook.clone());
+            // Job webhooks extend runner webhooks
+            let mut webhook = runner_webhook.clone();
+            webhook.extend(job.webhook);
 
             Ok(Job {
                 id,
@@ -831,7 +862,8 @@ jobs:
     fn parse_runner_webhook() {
         let yaml = r#"
 runner:
-  webhook: https://hooks.slack.com/test
+  webhook:
+    - url: https://hooks.slack.com/test
 jobs:
   test:
     schedule:
@@ -839,26 +871,30 @@ jobs:
     run: echo test
 "#;
         let (runner, jobs) = parse_config(yaml).unwrap();
-        assert_eq!(runner.webhook.as_deref(), Some("https://hooks.slack.com/test"));
+        assert_eq!(runner.webhook.len(), 1);
+        assert_eq!(runner.webhook[0].to_url(), "https://hooks.slack.com/test");
         // Job inherits runner webhook
-        assert_eq!(jobs[0].webhook.as_deref(), Some("https://hooks.slack.com/test"));
+        assert_eq!(jobs[0].webhook.len(), 1);
+        assert_eq!(jobs[0].webhook[0].to_url(), "https://hooks.slack.com/test");
     }
 
     #[test]
-    fn parse_job_webhook_override() {
+    fn parse_job_webhook_extends_runner() {
         let yaml = r#"
 runner:
-  webhook: https://hooks.slack.com/default
+  webhook:
+    - url: https://hooks.slack.com/default
 jobs:
   test:
     schedule:
       cron: "* * * * *"
     run: echo test
-    webhook: https://discord.com/api/webhooks/custom
+    webhook:
+      - url: https://discord.com/api/webhooks/custom
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
-        // Job webhook overrides runner webhook
-        assert_eq!(jobs[0].webhook.as_deref(), Some("https://discord.com/api/webhooks/custom"));
+        // Job webhook extends runner webhook (both included)
+        assert_eq!(jobs[0].webhook.len(), 2);
     }
 
     #[test]
@@ -871,7 +907,45 @@ jobs:
     run: echo test
 "#;
         let (runner, jobs) = parse_config(yaml).unwrap();
-        assert!(runner.webhook.is_none());
-        assert!(jobs[0].webhook.is_none());
+        assert!(runner.webhook.is_empty());
+        assert!(jobs[0].webhook.is_empty());
+    }
+
+    #[test]
+    fn parse_discord_webhook() {
+        let yaml = r#"
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+    webhook:
+      - id: "123456"
+        token: "abcdef"
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs[0].webhook.len(), 1);
+        assert_eq!(
+            jobs[0].webhook[0].to_url(),
+            "https://discord.com/api/webhooks/123456/abcdef"
+        );
+    }
+
+    #[test]
+    fn parse_multiple_webhooks() {
+        let yaml = r#"
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    run: echo test
+    webhook:
+      - url: https://hooks.slack.com/first
+      - url: https://hooks.slack.com/second
+      - id: discord_id
+        token: discord_token
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs[0].webhook.len(), 3);
     }
 }

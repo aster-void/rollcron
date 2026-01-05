@@ -74,6 +74,8 @@ runner:                       # Optional: global settings
   env_file: .env              # Optional: global .env file (relative to repo root)
   env:                        # Optional: global environment variables
     KEY: value
+  webhook:                    # Optional: default webhooks for all jobs
+    - url: $SLACK_WEBHOOK     # URL format (env vars expanded)
 
 jobs:
   <job-id>:                   # Key is the job ID (used for directories)
@@ -88,7 +90,10 @@ jobs:
     env_file: .env.local      # Optional: .env file (relative to job snapshot dir)
     env:                      # Optional: inline environment variables
       KEY: value
-    webhook: https://...      # Optional: webhook URL for failure notifications
+    webhook:                  # Optional: webhook list (extends runner webhooks)
+      - url: https://...      # URL format
+      - id: "..."             # Discord format
+        token: "..."
     retry:                    # Optional
       max: 3                  # Max retry attempts
       delay: 1s               # Initial delay (default: 1s), exponential backoff
@@ -104,7 +109,7 @@ Global settings that apply to all jobs:
 | `timezone` | Timezone for cron schedule interpretation. Use IANA names (e.g., `Asia/Tokyo`, `America/New_York`), `inherit` (system timezone), or omit for UTC |
 | `env_file` | Path to .env file (relative to repo root) |
 | `env` | Inline key-value environment variables |
-| `webhook` | Webhook URL for failure notifications (default for all jobs) |
+| `webhook` | List of webhooks for failure notifications (default for all jobs) |
 
 ### Webhooks
 
@@ -112,12 +117,24 @@ Send notifications when jobs fail (after all retries exhausted):
 
 ```yaml
 runner:
-  webhook: https://hooks.slack.com/services/...  # Default for all jobs
+  webhook:                                    # Default webhooks for all jobs
+    - url: $SLACK_WEBHOOK_URL                 # URL format (supports $VAR expansion)
 
 jobs:
   critical-job:
-    webhook: https://discord.com/api/webhooks/...  # Override for this job
+    webhook:                                  # Job webhooks extend runner webhooks
+      - url: https://hooks.slack.com/...      # Direct URL
+      - id: $DISCORD_WEBHOOK_ID               # Discord format: id + token
+        token: $DISCORD_WEBHOOK_TOKEN
 ```
+
+Webhook formats:
+- `{ url: "https://..." }` - Direct URL (Slack, custom endpoints)
+- `{ id: "...", token: "..." }` - Discord webhook (constructs URL automatically)
+
+Environment variables (`$VAR`, `${VAR}`) are expanded in webhook URLs, so you don't need to commit credentials.
+
+Job webhooks are **added to** runner webhooks (not overriding). If runner has 1 webhook and job has 1, the job will notify both.
 
 Payload format (JSON POST):
 ```json
