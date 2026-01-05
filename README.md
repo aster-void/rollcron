@@ -71,6 +71,9 @@ rollcron https://github.com/ut-code/rollcron
 runner:                       # Optional: global settings
   timezone: Asia/Tokyo        # Timezone for cron schedules (default: UTC)
                               # Use "inherit" to use system timezone
+  env_file: .env              # Optional: global .env file (relative to repo root)
+  env:                        # Optional: global environment variables
+    KEY: value
 
 jobs:
   <job-id>:                   # Key is the job ID (used for directories)
@@ -82,6 +85,9 @@ jobs:
     jitter: 30s               # Optional: random delay 0-30s before execution
     concurrency: skip         # Optional: parallel|wait|skip|replace (default: skip)
     working_dir: ./subdir     # Optional: working directory (relative to job snapshot dir)
+    env_file: .env.local      # Optional: .env file (relative to job snapshot dir)
+    env:                      # Optional: inline environment variables
+      KEY: value
     retry:                    # Optional
       max: 3                  # Max retry attempts
       delay: 1s               # Initial delay (default: 1s), exponential backoff
@@ -95,6 +101,37 @@ Global settings that apply to all jobs:
 | Field | Description |
 |-------|-------------|
 | `timezone` | Timezone for cron schedule interpretation. Use IANA names (e.g., `Asia/Tokyo`, `America/New_York`), `inherit` (system timezone), or omit for UTC |
+| `env_file` | Path to .env file (relative to repo root) |
+| `env` | Inline key-value environment variables |
+
+### Environment Variables
+
+Jobs can access environment variables from multiple sources. Variables are merged with the following priority (highest wins):
+
+1. `job.env` - Inline variables in job config
+2. `job.env_file` - Job-specific .env file (relative to job snapshot dir)
+3. `runner.env` - Inline variables in runner config
+4. `runner.env_file` - Global .env file (relative to repo root)
+5. Host environment - Inherited from the system
+
+Example:
+
+```yaml
+runner:
+  env_file: .env                # Load from repo root
+  env:
+    API_URL: https://api.example.com
+    DEBUG: "true"
+
+jobs:
+  my-job:
+    schedule:
+      cron: "*/5 * * * *"
+    run: echo $API_URL $JOB_SECRET
+    env_file: .env.local        # Load from job snapshot dir
+    env:
+      DEBUG: "false"            # Overrides runner.env
+```
 
 ### Concurrency
 
@@ -182,6 +219,9 @@ Options:
 ```yaml
 runner:
   timezone: America/New_York
+  env_file: .env
+  env:
+    NODE_ENV: production
 
 jobs:
   test:
@@ -190,6 +230,8 @@ jobs:
       cron: "0 */6 * * *"
     run: npm test
     working_dir: ./frontend
+    env:
+      NODE_ENV: test       # Override for testing
     retry:
       max: 2
       delay: 30s
@@ -201,6 +243,7 @@ jobs:
     run: ./deploy.sh
     timeout: 10m
     concurrency: skip      # Don't deploy if previous deploy is running
+    env_file: .env.deploy
 
   cleanup:
     schedule:
