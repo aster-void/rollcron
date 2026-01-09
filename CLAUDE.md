@@ -21,7 +21,7 @@ src/
 struct Job {
     id: String,           // Key from YAML (used for directories)
     name: String,         // Display name (defaults to id)
-    schedule: cron::Schedule,
+    schedule: croner::Cron,
     command: String,
     timeout: Duration,
     concurrency: Concurrency,
@@ -98,7 +98,7 @@ jobs:
 2. **Tar available**: `tar` command for archive extraction
 3. **Shell available**: Jobs run via `sh -c "<command>"`
 4. **Remote auth**: SSH keys or credentials pre-configured for remote repos
-5. **Cron format**: Standard 5-field cron (internally converted to 6-field for `cron` crate)
+5. **Cron format**: Standard 5-field cron (via `croner` crate)
 
 ## Key Flows
 
