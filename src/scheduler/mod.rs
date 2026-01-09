@@ -112,11 +112,21 @@ impl Handler<Tick> for Scheduler {
                     return false;
                 }
                 let tz_config = job.timezone.as_ref().unwrap_or(&self.runner.timezone);
-                match tz_config {
+                let is_due = match tz_config {
                     TimezoneConfig::Utc => is_job_due(&job.schedule, Utc),
                     TimezoneConfig::Inherit => is_job_due(&job.schedule, Local),
                     TimezoneConfig::Named(tz) => is_job_due(&job.schedule, *tz),
+                };
+                if is_due {
+                    info!(
+                        target: "rollcron::scheduler",
+                        job_id = %job.id,
+                        timezone = ?tz_config,
+                        now_utc = %Utc::now(),
+                        "Job triggered"
+                    );
                 }
+                is_due
             })
             .cloned()
             .collect();
@@ -287,11 +297,97 @@ where
 {
     let now = Utc::now().with_timezone(&tz);
     if let Some(next) = schedule.upcoming(tz).next() {
-        let until_next = (next - now).num_milliseconds();
-        // Allow jobs to be triggered slightly after their scheduled time
-        // (e.g., due to minor clock drift or processing delay)
-        until_next <= SCHEDULE_TOLERANCE_MS && until_next >= -SCHEDULE_TOLERANCE_MS
+        let until_next = (next.clone() - now.clone()).num_milliseconds();
+        let is_due = until_next <= SCHEDULE_TOLERANCE_MS && until_next >= -SCHEDULE_TOLERANCE_MS;
+        if is_due {
+            info!(
+                target: "rollcron::scheduler",
+                now = %now,
+                next = %next,
+                until_next_ms = until_next,
+                "Schedule matched"
+            );
+        }
+        is_due
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+    use chrono_tz::Asia::Tokyo;
+    use cron::Schedule;
+    use std::str::FromStr;
+
+    #[test]
+    fn debug_timezone_schedule() {
+        // "0 8 * * *" -> "0 0 8 * * *" (8:00 AM)
+        let schedule = Schedule::from_str("0 0 8 * * *").unwrap();
+
+        let now_utc = Utc::now();
+        let now_tokyo = now_utc.with_timezone(&Tokyo);
+
+        println!("Current UTC: {}", now_utc);
+        println!("Current Tokyo: {}", now_tokyo);
+
+        // Get next scheduled time in Tokyo timezone
+        let next_tokyo = schedule.upcoming(Tokyo).next().unwrap();
+        println!("Next scheduled (Tokyo): {}", next_tokyo);
+
+        // Get next scheduled time in UTC
+        let next_utc = schedule.upcoming(Utc).next().unwrap();
+        println!("Next scheduled (UTC): {}", next_utc);
+
+        // The difference should reflect timezone
+        println!("Tokyo next in UTC: {}", next_tokyo.with_timezone(&Utc));
+    }
+
+    #[test]
+    fn debug_is_job_due_at_specific_time() {
+        // Simulate: it's 8:00 AM Tokyo, job should be due
+        let schedule = Schedule::from_str("0 0 8 * * *").unwrap();
+
+        // 8:00 AM Tokyo = 23:00 UTC (previous day)
+        let fake_now_utc = chrono::Utc.with_ymd_and_hms(2026, 1, 9, 23, 0, 0).unwrap();
+        let fake_now_tokyo = fake_now_utc.with_timezone(&Tokyo);
+        println!("Fake now UTC: {}", fake_now_utc);
+        println!("Fake now Tokyo: {}", fake_now_tokyo);
+
+        // What does upcoming return at this time?
+        let next = schedule.upcoming(Tokyo).next().unwrap();
+        println!("Next scheduled: {}", next);
+
+        // Check: is 8:00 AM Tokyo the next time?
+        let expected = Tokyo.with_ymd_and_hms(2026, 1, 10, 8, 0, 0).unwrap();
+        println!("Expected: {}", expected);
+        println!("Match: {}", next == expected);
+    }
+
+    #[test]
+    fn debug_what_triggers_at_2108() {
+        // User reports job triggers at 21:08 JST (9:08 PM)
+        // Let's see what schedule would match at this time
+        let schedule = Schedule::from_str("0 0 8 * * *").unwrap();
+
+        // 21:08 JST = 12:08 UTC
+        println!("=== Testing at 21:08 JST ===");
+        let time_2108_jst = Tokyo.with_ymd_and_hms(2026, 1, 9, 21, 8, 0).unwrap();
+        println!("Time in JST: {}", time_2108_jst);
+        println!("Time in UTC: {}", time_2108_jst.with_timezone(&Utc));
+
+        let next_tokyo = schedule.upcoming(Tokyo).next().unwrap();
+        let next_utc = schedule.upcoming(Utc).next().unwrap();
+        println!("Next (Tokyo tz): {}", next_tokyo);
+        println!("Next (UTC tz): {}", next_utc);
+
+        // Check if 21:08 would match any interpretation
+        println!("\n=== What cron would trigger at 21:08? ===");
+        // "8 21 * * *" = 21:08
+        let schedule_2108 = Schedule::from_str("0 8 21 * * *").unwrap();
+        let next_2108 = schedule_2108.upcoming(Tokyo).next().unwrap();
+        println!("Schedule '0 8 21 * * *' next: {}", next_2108);
     }
 }
