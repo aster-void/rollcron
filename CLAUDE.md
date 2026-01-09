@@ -27,6 +27,8 @@ struct Job {
     concurrency: Concurrency,
     retry: Option<RetryConfig>,
     jitter: Option<Duration>,  // Random delay before execution (0 to jitter)
+    log_file: Option<String>,  // Path to log file (relative to job dir)
+    log_max_size: u64,         // Max log size before rotation (default: 10M)
 }
 
 struct RetryConfig {
@@ -62,6 +64,8 @@ jobs:
       delay: 1s              # Initial delay (default: 1s), exponential backoff
       jitter: 500ms          # Optional: random variation 0-500ms added to retry delay
                              # If omitted, auto-inferred as 25% of delay (e.g., 250ms for 1s delay)
+    log_file: output.log     # Optional: file path for stdout/stderr
+    log_max_size: 10M        # Optional: max size before rotation (default: 10M)
 ```
 
 ## Runtime Directory Layout
@@ -103,7 +107,25 @@ jobs:
 3. If due: spawn task in job's directory (by ID) with timeout
 4. Apply task jitter (random delay 0 to jitter) before first execution
 5. On failure: apply exponential backoff + retry jitter before retry
-6. Log using display name
+
+## Logging
+
+When `log_file` is set, command stdout/stderr is appended to the specified file. If not set, output is discarded.
+
+```yaml
+jobs:
+  backup:
+    run: ./scripts/backup.sh
+    log_file: backup.log      # Written to <job_dir>/backup.log
+    log_max_size: 50M         # Rotate when file exceeds 50MB
+```
+
+**Rotation**: When log file exceeds `log_max_size`:
+1. `backup.log` → `backup.log.old`
+2. Previous `.old` is deleted
+3. New `backup.log` created
+
+**Size format**: `10M` (megabytes), `1G` (gigabytes), `512K` (kilobytes), or bytes
 
 ## Constraints
 

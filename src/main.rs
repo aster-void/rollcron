@@ -1,6 +1,7 @@
 mod config;
 mod env;
 mod git;
+mod logging;
 mod scheduler;
 
 use anyhow::{Context, Result};
@@ -9,6 +10,7 @@ use scheduler::{ConfigUpdate, Scheduler, SyncRequest};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time::interval;
+use tracing::{error, info, warn};
 use xtra::prelude::*;
 
 const CONFIG_FILE: &str = "rollcron.yaml";
@@ -26,6 +28,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    logging::init();
     let args = Args::parse();
 
     // Expand shell variables (~, $VAR) and canonicalize local paths
@@ -40,12 +43,11 @@ async fn main() -> Result<()> {
         expanded_repo
     };
 
-    println!("[rollcron] Source: {}", source);
-    println!("[rollcron] Pull interval: {}s", args.pull_interval);
+    info!(source = %source, pull_interval = args.pull_interval, "Starting rollcron");
 
     // Initial sync
     let (sot_path, _) = git::ensure_repo(&source)?;
-    println!("[rollcron] Cache: {}", sot_path.display());
+    info!(cache = %sot_path.display(), "Repository ready");
 
     let (initial_runner, initial_jobs) = load_config(&sot_path)?;
 
@@ -73,7 +75,7 @@ async fn main() -> Result<()> {
             let (sot, update_info) = match git::ensure_repo(&source_clone) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("[rollcron] Sync failed: {}", e);
+                    error!(error = %e, "Sync failed");
                     continue;
                 }
             };
@@ -82,7 +84,7 @@ async fn main() -> Result<()> {
                 continue;
             };
 
-            println!("[rollcron] Pulled {}", range);
+            info!(range = %range, "Pulled updates");
 
             match load_config(&sot) {
                 Ok((runner, jobs)) => {
@@ -95,15 +97,15 @@ async fn main() -> Result<()> {
                         })
                         .await
                     {
-                        eprintln!("[rollcron] Failed to queue sync: {}", e);
+                        error!(error = %e, "Failed to queue sync");
                         continue;
                     }
                     // Update config
                     if let Err(e) = scheduler_clone.send(ConfigUpdate { jobs, runner }).await {
-                        eprintln!("[rollcron] Failed to update config: {}", e);
+                        error!(error = %e, "Failed to update config");
                     }
                 }
-                Err(e) => eprintln!("[rollcron] Failed to reload config: {}", e),
+                Err(e) => error!(error = %e, "Failed to reload config"),
             }
         }
     });
@@ -111,12 +113,12 @@ async fn main() -> Result<()> {
     // Wait for shutdown signal or task panic
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
-            println!("[rollcron] Shutting down...");
+            info!("Shutting down...");
         }
         result = sync_handle => {
             match result {
-                Ok(()) => eprintln!("[rollcron] Sync task exited unexpectedly"),
-                Err(e) => eprintln!("[rollcron] Sync task panicked: {}", e),
+                Ok(()) => warn!("Sync task exited unexpectedly"),
+                Err(e) => error!(error = %e, "Sync task panicked"),
             }
         }
     }

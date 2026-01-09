@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::task::JoinHandle;
+use tracing::{error, info, warn};
 use xtra::prelude::*;
 use xtra::refcount::Weak;
 
@@ -37,7 +38,7 @@ impl Scheduler {
 
     fn try_sync_job(&mut self, job_id: &str) -> anyhow::Result<bool> {
         if self.pending_syncs.remove(job_id) {
-            println!("[job:{}] Syncing directory", job_id);
+            info!(target: "rollcron::scheduler", job_id = %job_id, "Syncing directory");
             let job_dir = git::get_job_dir(&self.sot_path, job_id);
             git::sync_to_job_dir(&self.sot_path, &job_dir)?;
             Ok(true)
@@ -122,7 +123,7 @@ impl Handler<Tick> for Scheduler {
 
         for job in due_jobs {
             if let Err(e) = self.try_sync_job(&job.id) {
-                eprintln!("[job:{}] Sync failed: {}", job.id, e);
+                error!(target: "rollcron::scheduler", job_id = %job.id, error = %e, "Sync failed");
                 continue;
             }
 
@@ -158,7 +159,7 @@ impl Handler<ConfigUpdate> for Scheduler {
     async fn handle(&mut self, msg: ConfigUpdate, _ctx: &mut Context<Self>) {
         self.jobs = msg.jobs;
         self.runner = msg.runner;
-        println!("[rollcron] Config updated");
+        info!(target: "rollcron::scheduler", "Config updated");
     }
 }
 
@@ -177,8 +178,6 @@ impl Handler<JobCompleted> for Scheduler {
 
 impl Scheduler {
     async fn handle_job_trigger(&mut self, job: Job, addr: Address<Scheduler, Weak>) {
-        let tag = format!("[job:{}]", job.id);
-
         self.cleanup_finished_handles(&job.id);
         let running_count = self.running_count(&job.id);
 
@@ -188,9 +187,11 @@ impl Scheduler {
             }
             Concurrency::Wait => {
                 if running_count > 0 {
-                    println!(
-                        "{} Waiting for {} previous run(s) to complete",
-                        tag, running_count
+                    info!(
+                        target: "rollcron::scheduler",
+                        job_id = %job.id,
+                        running_count,
+                        "Waiting for previous run(s) to complete"
                     );
                     // Spawn waiting job asynchronously to avoid blocking the actor
                     self.spawn_waiting_job(job, addr);
@@ -200,14 +201,24 @@ impl Scheduler {
             }
             Concurrency::Skip => {
                 if running_count > 0 {
-                    println!("{} Skipped ({} instance(s) still active)", tag, running_count);
+                    info!(
+                        target: "rollcron::scheduler",
+                        job_id = %job.id,
+                        running_count,
+                        "Skipped (instances still active)"
+                    );
                 } else {
                     self.spawn_job(job, addr);
                 }
             }
             Concurrency::Replace => {
                 if running_count > 0 {
-                    println!("{} Replacing {} previous run(s)", tag, running_count);
+                    info!(
+                        target: "rollcron::scheduler",
+                        job_id = %job.id,
+                        running_count,
+                        "Replacing previous run(s)"
+                    );
                     if let Some(handles) = self.job_handles.remove(&job.id) {
                         for handle in handles {
                             handle.abort();
@@ -229,7 +240,7 @@ impl Scheduler {
         let handle = tokio::spawn(async move {
             execute_job(&job, &work_dir, &sot_path, &runner).await;
             if let Err(e) = addr.send(JobCompleted).await {
-                eprintln!("[job:{}] Failed to notify completion: {}", job_id_for_log, e);
+                warn!(target: "rollcron::scheduler", job_id = %job_id_for_log, error = %e, "Failed to notify completion");
             }
         });
 
@@ -257,7 +268,7 @@ impl Scheduler {
             // Now execute the new job
             execute_job(&job, &work_dir, &sot_path, &runner).await;
             if let Err(e) = addr.send(JobCompleted).await {
-                eprintln!("[job:{}] Failed to notify completion: {}", job_id_for_log, e);
+                warn!(target: "rollcron::scheduler", job_id = %job_id_for_log, error = %e, "Failed to notify completion");
             }
         });
 

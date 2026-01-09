@@ -109,6 +109,9 @@ pub struct JobConfig {
     pub env: Option<HashMap<String, String>>,
     #[serde(default)]
     pub webhook: Vec<WebhookConfig>,
+    pub log_file: Option<String>,
+    #[serde(default = "default_log_max_size")]
+    pub log_max_size: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,6 +137,10 @@ fn default_timeout() -> String {
     "10s".to_string()
 }
 
+fn default_log_max_size() -> String {
+    "10M".to_string()
+}
+
 #[derive(Debug, Clone)]
 pub struct Job {
     pub id: String,
@@ -150,6 +157,8 @@ pub struct Job {
     pub env_file: Option<String>,
     pub env: Option<HashMap<String, String>>,
     pub webhook: Vec<WebhookConfig>,
+    pub log_file: Option<String>,
+    pub log_max_size: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -310,6 +319,9 @@ pub fn parse_config(content: &str) -> Result<(RunnerConfig, Vec<Job>)> {
             let mut webhook = runner_webhook.clone();
             webhook.extend(job.webhook);
 
+            let log_max_size = parse_size(&job.log_max_size)
+                .map_err(|e| anyhow!("Invalid log_max_size in job '{}': {}", id, e))?;
+
             Ok(Job {
                 id,
                 name,
@@ -325,6 +337,8 @@ pub fn parse_config(content: &str) -> Result<(RunnerConfig, Vec<Job>)> {
                 env_file: job.env_file,
                 env: job.env,
                 webhook,
+                log_file: job.log_file,
+                log_max_size,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -344,6 +358,19 @@ fn parse_duration(s: &str) -> Result<Duration> {
         Ok(Duration::from_secs(hours.parse::<u64>()? * 3600))
     } else {
         Ok(Duration::from_secs(s.parse()?))
+    }
+}
+
+fn parse_size(s: &str) -> Result<u64> {
+    let s = s.trim();
+    if let Some(n) = s.strip_suffix('G') {
+        Ok(n.parse::<u64>()? * 1024 * 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix('M') {
+        Ok(n.parse::<u64>()? * 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix('K') {
+        Ok(n.parse::<u64>()? * 1024)
+    } else {
+        Ok(s.parse()?)
     }
 }
 

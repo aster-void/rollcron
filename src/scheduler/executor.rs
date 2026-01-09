@@ -1,9 +1,12 @@
 use serde::Serialize;
 use std::collections::HashMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::sleep;
+use tracing::{debug, error, info, warn};
 
 use crate::config::{Job, RunnerConfig};
 use crate::env;
@@ -27,13 +30,13 @@ async fn send_webhook(url: &str, payload: &WebhookPayload) {
     let client = reqwest::Client::new();
     match client.post(url).json(payload).send().await {
         Ok(resp) if resp.status().is_success() => {
-            println!("[webhook] Notification sent to {}", url);
+            info!(target: "rollcron::webhook", url = %url, "Notification sent");
         }
         Ok(resp) => {
-            eprintln!("[webhook] Failed to send notification: HTTP {}", resp.status());
+            error!(target: "rollcron::webhook", url = %url, status = %resp.status(), "Failed to send notification");
         }
         Err(e) => {
-            eprintln!("[webhook] Failed to send notification: {}", e);
+            error!(target: "rollcron::webhook", url = %url, error = %e, "Failed to send notification");
         }
     }
 }
@@ -48,9 +51,11 @@ pub fn resolve_work_dir(sot_path: &PathBuf, job_id: &str, working_dir: &Option<S
             match (work_path.canonicalize(), job_dir.canonicalize()) {
                 (Ok(resolved), Ok(base)) if resolved.starts_with(&base) => resolved,
                 _ => {
-                    eprintln!(
-                        "[job:{}] Invalid working_dir '{}': path traversal or non-existent",
-                        job_id, dir
+                    warn!(
+                        target: "rollcron::scheduler",
+                        job_id = %job_id,
+                        working_dir = %dir,
+                        "Invalid working_dir: path traversal or non-existent"
                     );
                     job_dir
                 }
@@ -60,14 +65,50 @@ pub fn resolve_work_dir(sot_path: &PathBuf, job_id: &str, working_dir: &Option<S
     }
 }
 
+/// Rotate log file if it exceeds max_size: .log -> .log.old
+fn rotate_log_file(path: &PathBuf, max_size: u64) {
+    if let Ok(meta) = fs::metadata(path) {
+        if meta.len() >= max_size {
+            let old_path = path.with_extension("log.old");
+            let _ = fs::remove_file(&old_path);
+            let _ = fs::rename(path, &old_path);
+        }
+    }
+}
+
+/// Create log file for job output
+fn create_log_file(job_dir: &PathBuf, log_path: &str, max_size: u64) -> Option<File> {
+    let expanded = env::expand_string(log_path);
+    let full_path = job_dir.join(&expanded);
+
+    // Create parent directories if needed
+    if let Some(parent) = full_path.parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            warn!(target: "rollcron::scheduler", error = %e, "Failed to create log directory");
+            return None;
+        }
+    }
+
+    rotate_log_file(&full_path, max_size);
+
+    match OpenOptions::new().create(true).append(true).open(&full_path) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            warn!(target: "rollcron::scheduler", error = %e, "Failed to create log file");
+            None
+        }
+    }
+}
+
 pub async fn execute_job(job: &Job, work_dir: &PathBuf, sot_path: &PathBuf, runner: &RunnerConfig) {
-    let tag = format!("[job:{}]", job.id);
+    let job_dir = git::get_job_dir(sot_path, &job.id);
+    let mut log_file = job.log_file.as_ref().and_then(|p| create_log_file(&job_dir, p, job.log_max_size));
 
     // Apply task jitter before first execution
     if let Some(jitter_max) = job.jitter {
         let jitter = generate_jitter(jitter_max);
         if jitter > Duration::ZERO {
-            println!("{} Applying jitter: {:?}", tag, jitter);
+            debug!(target: "rollcron::scheduler", job_id = %job.id, jitter = ?jitter, "Applying jitter");
             sleep(jitter).await;
         }
     }
@@ -79,16 +120,28 @@ pub async fn execute_job(job: &Job, work_dir: &PathBuf, sot_path: &PathBuf, runn
         if attempt > 0 {
             if let Some(retry) = job.retry.as_ref() {
                 let delay = calculate_backoff(retry, attempt - 1);
-                println!("{} Retry {}/{} after {:?}", tag, attempt, max_attempts - 1, delay);
+                info!(
+                    target: "rollcron::scheduler",
+                    job_id = %job.id,
+                    attempt,
+                    max_retries = max_attempts - 1,
+                    delay = ?delay,
+                    "Retrying"
+                );
                 sleep(delay).await;
             }
         }
 
-        println!("{} Starting '{}'", tag, job.name);
-        println!("{}   command: {}", tag, job.command);
+        info!(
+            target: "rollcron::scheduler",
+            job_id = %job.id,
+            name = %job.name,
+            command = %job.command,
+            "Starting job"
+        );
 
         let result = run_command(job, work_dir, sot_path, runner).await;
-        let success = handle_result(&tag, job, &result);
+        let success = handle_result(job, &result, log_file.as_mut());
 
         if success {
             return;
@@ -97,7 +150,7 @@ pub async fn execute_job(job: &Job, work_dir: &PathBuf, sot_path: &PathBuf, runn
         last_result = Some(result);
 
         if attempt + 1 < max_attempts {
-            println!("{} Will retry...", tag);
+            debug!(target: "rollcron::scheduler", job_id = %job.id, "Will retry...");
         }
     }
 
@@ -247,42 +300,37 @@ enum CommandResult {
     Timeout,
 }
 
-fn print_output_lines(tag: &str, output: &str, use_stderr: bool) {
-    if output.trim().is_empty() {
-        return;
-    }
-    for line in output.lines() {
-        if use_stderr {
-            eprintln!("{}   | {}", tag, line);
-        } else {
-            println!("{}   | {}", tag, line);
-        }
-    }
-}
-
-fn handle_result(tag: &str, job: &Job, result: &CommandResult) -> bool {
+fn handle_result(job: &Job, result: &CommandResult, log_file: Option<&mut File>) -> bool {
     match result {
         CommandResult::Completed(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
 
+            // Write stdout/stderr to log file
+            if let Some(file) = log_file {
+                let _ = file.write_all(stdout.as_bytes());
+                let _ = file.write_all(stderr.as_bytes());
+            }
+
             if output.status.success() {
-                println!("{} ✓ Completed", tag);
-                print_output_lines(tag, &stdout, false);
+                info!(target: "rollcron::scheduler", job_id = %job.id, "Completed");
                 true
             } else {
-                eprintln!("{} ✗ Failed (exit code: {:?})", tag, output.status.code());
-                print_output_lines(tag, &stderr, true);
-                print_output_lines(tag, &stdout, true);
+                error!(
+                    target: "rollcron::scheduler",
+                    job_id = %job.id,
+                    exit_code = ?output.status.code(),
+                    "Failed"
+                );
                 false
             }
         }
         CommandResult::ExecError(e) => {
-            eprintln!("{} ✗ Failed to execute: {}", tag, e);
+            error!(target: "rollcron::scheduler", job_id = %job.id, error = %e, "Failed to execute");
             false
         }
         CommandResult::Timeout => {
-            eprintln!("{} ✗ Timeout after {:?}", tag, job.timeout);
+            error!(target: "rollcron::scheduler", job_id = %job.id, timeout = ?job.timeout, "Timeout");
             false
         }
     }
@@ -312,6 +360,8 @@ mod tests {
             env_file: None,
             env: None,
             webhook: vec![],
+            log_file: None,
+            log_max_size: 10 * 1024 * 1024,
         }
     }
 
