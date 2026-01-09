@@ -92,6 +92,8 @@ jobs:
       max: 3                  # Max retry attempts
       delay: 1s               # Initial delay (default: 1s), exponential backoff
       jitter: 500ms           # Optional: random variation (default: 25% of delay)
+    log_file: output.log      # Optional: file for stdout/stderr (relative to job dir)
+    log_max_size: 10M         # Optional: rotate when exceeded (default: 10M)
 ```
 
 ### Runner
@@ -201,6 +203,24 @@ retry:
   delay: 2s     # Initial delay (doubles each retry: 2s, 4s, 8s)
   jitter: 500ms # Optional: random variation (default: 25% of delay)
 ```
+
+### Logging
+
+Capture job output to a file:
+
+```yaml
+jobs:
+  backup:
+    run: ./backup.sh
+    log_file: backup.log    # Written to <job_dir>/backup.log
+    log_max_size: 50M       # Rotate when file exceeds 50MB (default: 10M)
+```
+
+When `log_file` is set, stdout/stderr is appended to the file. Without it, output is discarded.
+
+**Rotation**: When the log exceeds `log_max_size`, it's renamed to `backup.log.old` (previous `.old` is deleted).
+
+**Size format**: `10M` (megabytes), `1G` (gigabytes), `512K` (kilobytes), or plain bytes.
 
 ### Cron Expression
 
