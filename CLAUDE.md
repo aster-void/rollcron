@@ -29,6 +29,8 @@ struct Job {
     jitter: Option<Duration>,  // Random delay before execution (0 to jitter)
     log_file: Option<String>,  // Path to log file (relative to job dir)
     log_max_size: u64,         // Max log size before rotation (default: 10M)
+    env_file: Option<String>,  // Path to .env file (relative to job dir)
+    env: Option<HashMap<String, String>>,  // Inline env vars
 }
 
 struct RetryConfig {
@@ -36,6 +38,13 @@ struct RetryConfig {
     delay: Duration,      // Initial delay (exponential backoff)
     jitter: Option<Duration>,  // Random variation added to retry delay (0 to jitter)
                                // Auto-inferred as 25% of delay when not set
+}
+
+struct RunnerConfig {
+    timezone: TimezoneConfig,
+    env_file: Option<String>,  // Path to .env file (relative to repo root)
+    env: Option<HashMap<String, String>>,  // Inline env vars
+    webhook: Vec<WebhookConfig>,
 }
 
 // Parsed from rollcron.yaml
@@ -49,6 +58,9 @@ struct ScheduleConfig { cron: String }
 ```yaml
 runner:                        # Optional: global settings
   timezone: Asia/Tokyo         # Optional: IANA name, "inherit" (system), or omit for UTC
+  env_file: .env               # Optional: load env vars from file
+  env:                         # Optional: inline env vars
+    KEY: value
 
 jobs:
   <job-id>:                  # Key = ID (used for directories)
@@ -66,6 +78,9 @@ jobs:
                              # If omitted, auto-inferred as 25% of delay (e.g., 250ms for 1s delay)
     log_file: output.log     # Optional: file path for stdout/stderr
     log_max_size: 10M        # Optional: max size before rotation (default: 10M)
+    env_file: .env           # Optional: load env vars from file (relative to job dir)
+    env:                     # Optional: inline env vars
+      KEY: value
 ```
 
 ## Runtime Directory Layout
@@ -126,6 +141,32 @@ jobs:
 3. New `backup.log` created
 
 **Size format**: `10M` (megabytes), `1G` (gigabytes), `512K` (kilobytes), or bytes
+
+## Environment Variables
+
+Environment variables can be set at runner (global) or job level, via inline definitions or `.env` files.
+
+```yaml
+runner:
+  env_file: .env.global      # Loaded from repo root
+  env:
+    GLOBAL_VAR: value
+
+jobs:
+  my-job:
+    env_file: .env.local     # Loaded from job directory
+    env:
+      JOB_VAR: value
+```
+
+**Priority** (later overrides earlier):
+```
+host ENV < runner.env_file < runner.env < job.env_file < job.env
+```
+
+**Shell expansion**: Values support `~` and `$VAR` / `${VAR}` expansion.
+
+**Security**: `env_file` paths are validated to prevent path traversal (must stay within base directory).
 
 ## Constraints
 
