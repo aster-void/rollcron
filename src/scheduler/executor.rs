@@ -218,43 +218,6 @@ async fn run_command(job: &Job, work_dir: &PathBuf, sot_path: &PathBuf, runner: 
     }
 }
 
-/// Validate that a path stays within the base directory (prevents path traversal).
-fn validate_env_file_path(
-    env_file_path: &str,
-    base_dir: &PathBuf,
-    context: &str,
-) -> anyhow::Result<PathBuf> {
-    let expanded = env::expand_string(env_file_path);
-    let full_path = base_dir.join(&expanded);
-
-    // Canonicalize to resolve .. and symlinks
-    match (full_path.canonicalize(), base_dir.canonicalize()) {
-        (Ok(resolved), Ok(base)) if resolved.starts_with(&base) => Ok(resolved),
-        (Ok(_), Ok(_)) => {
-            anyhow::bail!(
-                "{} env_file '{}': path traversal detected (must be within base directory)",
-                context,
-                env_file_path
-            )
-        }
-        (Err(e), _) => {
-            anyhow::bail!(
-                "{} env_file '{}': file not found or inaccessible: {}",
-                context,
-                env_file_path,
-                e
-            )
-        }
-        (_, Err(e)) => {
-            anyhow::bail!(
-                "{} base directory not accessible: {}",
-                context,
-                e
-            )
-        }
-    }
-}
-
 fn merge_env_vars(
     job: &Job,
     work_dir: &PathBuf,
@@ -265,8 +228,9 @@ fn merge_env_vars(
 
     // 1. Start with runner.env_file (loaded from sot_path)
     if let Some(env_file_path) = &runner.env_file {
-        let validated_path = validate_env_file_path(env_file_path, sot_path, "runner")?;
-        let vars = env::load_env_from_path(&validated_path)?;
+        let expanded = env::expand_string(env_file_path);
+        let full_path = sot_path.join(&expanded);
+        let vars = env::load_env_from_path(&full_path)?;
         env_vars.extend(vars);
     }
 
@@ -279,8 +243,9 @@ fn merge_env_vars(
 
     // 3. Merge job.env_file (loaded from work_dir)
     if let Some(env_file_path) = &job.env_file {
-        let validated_path = validate_env_file_path(env_file_path, work_dir, &format!("job:{}", job.id))?;
-        let vars = env::load_env_from_path(&validated_path)?;
+        let expanded = env::expand_string(env_file_path);
+        let full_path = work_dir.join(&expanded);
+        let vars = env::load_env_from_path(&full_path)?;
         env_vars.extend(vars);
     }
 

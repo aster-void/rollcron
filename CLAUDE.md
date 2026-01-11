@@ -165,8 +165,6 @@ host ENV < runner.env_file < runner.env < job.env_file < job.env
 
 **Shell expansion**: Values support `~` and `$VAR` / `${VAR}` expansion.
 
-**Security**: `env_file` paths are validated to prevent path traversal (must stay within base directory).
-
 ## Constraints
 
 - `cargo build` must pass
