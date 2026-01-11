@@ -111,7 +111,26 @@ pub async fn execute_job(job: &Job, sot_path: &PathBuf, runner: &RunnerConfig) -
 
         let runner_env = load_runner_env_vars(sot_path, runner);
         for webhook in &job.webhook {
-            send_webhook(&webhook.to_url(runner_env.as_ref()), &payload).await;
+            let url = webhook.to_url(runner_env.as_ref());
+            if url.contains('$') {
+                warn!(
+                    target: "rollcron::webhook",
+                    job_id = %job.id,
+                    url = %url,
+                    "Webhook URL contains unexpanded variable, skipping"
+                );
+                continue;
+            }
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                warn!(
+                    target: "rollcron::webhook",
+                    job_id = %job.id,
+                    url = %url,
+                    "Webhook URL must start with http:// or https://, skipping"
+                );
+                continue;
+            }
+            send_webhook(&url, &payload).await;
         }
     }
 

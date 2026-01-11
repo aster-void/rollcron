@@ -1025,4 +1025,17 @@ jobs:
             "https://discord.com/api/webhooks/from_env"
         );
     }
+
+    #[test]
+    fn webhook_undefined_env_var_kept_as_is() {
+        let env_vars = HashMap::new(); // empty
+
+        let webhook = WebhookConfig {
+            webhook_type: "discord".to_string(),
+            url: "$UNDEFINED_VAR".to_string(),
+        };
+
+        // Undefined vars are kept as-is (caller should validate)
+        assert_eq!(webhook.to_url(Some(&env_vars)), "$UNDEFINED_VAR");
+    }
 }
