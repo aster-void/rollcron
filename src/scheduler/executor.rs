@@ -292,10 +292,16 @@ fn handle_result(job: &Job, result: &CommandResult, log_file: Option<&mut File>)
         }
         CommandResult::ExecError(e) => {
             error!(target: "rollcron::scheduler", job_id = %job.id, error = %e, "Failed to execute");
+            if let Some(file) = log_file {
+                let _ = writeln!(file, "[rollcron] Error: {}", e);
+            }
             false
         }
         CommandResult::Timeout => {
             error!(target: "rollcron::scheduler", job_id = %job.id, timeout = ?job.timeout, "Timeout");
+            if let Some(file) = log_file {
+                let _ = writeln!(file, "[rollcron] Timeout after {:?}", job.timeout);
+            }
             false
         }
     }

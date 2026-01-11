@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -28,13 +28,23 @@ pub fn load_env_from_path(path: &PathBuf) -> Result<HashMap<String, String>> {
         return Ok(HashMap::new());
     }
 
-    let iter = dotenvy::from_path_iter(path)?;
+    let iter = dotenvy::from_path_iter(path)
+        .with_context(|| format_env_error(path))?;
     let mut vars = HashMap::new();
     for item in iter {
-        let (key, value) = item?;
+        let (key, value) = item.with_context(|| format_env_error(path))?;
         vars.insert(key, value);
     }
     Ok(vars)
+}
+
+fn format_env_error(path: &Path) -> String {
+    format!(
+        "failed to parse env file: {}\n\
+         hint: values with spaces must be quoted, e.g.:\n\
+         PRIVATE_KEY=\"-----BEGIN PRIVATE KEY-----\\nABC\\n-----END PRIVATE KEY-----\"",
+        path.display()
+    )
 }
 
 #[cfg(test)]
@@ -151,5 +161,48 @@ mod tests {
         // Undefined variables are kept as-is (no error)
         let result = expand_string("$UNDEFINED_VAR_12345");
         assert!(result.contains("UNDEFINED") || result.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod private_key_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_private_key_double_quoted() {
+        // Private keys with spaces (e.g., "PRIVATE KEY") MUST be double-quoted
+        let dir = TempDir::new().unwrap();
+        let env_path = dir.path().join(".env");
+        fs::write(
+            &env_path,
+            r#"GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBg\n-----END PRIVATE KEY-----\n""#,
+        )
+        .unwrap();
+
+        let vars = load_env_file(dir.path()).unwrap();
+        let key = vars.get("GOOGLE_PRIVATE_KEY").unwrap();
+        // Double quotes expand \n to actual newlines
+        assert!(key.contains('\n'));
+        assert!(key.contains("-----BEGIN PRIVATE KEY-----"));
+    }
+
+    #[test]
+    fn test_private_key_unquoted_fails() {
+        // Without quotes, spaces in values cause parse errors
+        let dir = TempDir::new().unwrap();
+        let env_path = dir.path().join(".env");
+        fs::write(
+            &env_path,
+            r#"GOOGLE_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nABC"#,
+        )
+        .unwrap();
+
+        let result = load_env_file(dir.path());
+        let err = result.unwrap_err();
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("hint:"));
+        assert!(msg.contains("values with spaces must be quoted"));
     }
 }
