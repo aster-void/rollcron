@@ -71,30 +71,58 @@ fn sync_repo(dest: &Path) -> Result<Option<String>> {
         .unwrap_or(false);
 
     if has_upstream {
-        let output = Command::new("git")
-            .args(["pull", "--ff-only"])
+        // Get current HEAD before fetch
+        let old_head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
             .current_dir(dest)
-            .env("LC_ALL", "C") // Ensure consistent English output
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+        // Fetch latest from remote
+        let fetch = Command::new("git")
+            .args(["fetch"])
+            .current_dir(dest)
+            .env("LC_ALL", "C")
             .output()?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("git pull failed: {}", stderr);
+        if !fetch.status.success() {
+            let stderr = String::from_utf8_lossy(&fetch.stderr);
+            anyhow::bail!("git fetch failed: {}", stderr);
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if stdout.contains("Already up to date") {
-            return Ok(None);
+        // Reset to upstream (handles diverged history)
+        let reset = Command::new("git")
+            .args(["reset", "--hard", "@{upstream}"])
+            .current_dir(dest)
+            .env("LC_ALL", "C")
+            .output()?;
+
+        if !reset.status.success() {
+            let stderr = String::from_utf8_lossy(&reset.stderr);
+            anyhow::bail!("git reset failed: {}", stderr);
         }
 
-        // Extract commit range from "Updating abc123..def456"
-        let range = stdout
-            .lines()
-            .find(|l| l.starts_with("Updating "))
-            .and_then(|l| l.strip_prefix("Updating "))
-            .map(|s| s.to_string());
+        // Get new HEAD after reset
+        let new_head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dest)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
 
-        return Ok(range.or_else(|| Some("updated".to_string())));
+        // Compare old and new HEAD to detect changes
+        match (old_head, new_head) {
+            (Some(old), Some(new)) if old == new => return Ok(None),
+            (Some(old), Some(new)) => {
+                let short_old = &old[..7.min(old.len())];
+                let short_new = &new[..7.min(new.len())];
+                return Ok(Some(format!("{}..{}", short_old, short_new)));
+            }
+            _ => return Ok(Some("updated".to_string())),
+        }
     }
 
     Ok(None)

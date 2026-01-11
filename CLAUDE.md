@@ -110,7 +110,7 @@ jobs:
 5. Start pull task + scheduler
 
 ### Pull Cycle (async task)
-1. `git pull --ff-only`
+1. `git fetch` + `git reset --hard @{upstream}`
 2. Parse config
 3. Sync all job dirs (by job ID)
 4. Send new jobs to scheduler via watch channel
