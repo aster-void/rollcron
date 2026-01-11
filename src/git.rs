@@ -26,21 +26,29 @@ impl Drop for TempDirGuard<'_> {
     }
 }
 
-/// Ensures repo is cloned/synced to cache. Returns (cache path, commit_range if updated).
-pub fn ensure_repo(source: &str) -> Result<(PathBuf, Option<String>)> {
-    let cache_dir = get_cache_dir(source)?;
+/// Generates a cache directory path with random suffix.
+pub fn generate_cache_path(source: &str) -> PathBuf {
+    let cache_base = dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("rollcron");
+
+    let repo_name = source
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .rsplit('/')
+        .next()
+        .unwrap_or("repo");
+
+    let random_suffix = generate_random_suffix();
+    cache_base.join(format!("{}-{}", repo_name, random_suffix))
+}
+
+/// Clones repo to specified cache path.
+pub fn clone_to(source: &str, cache_dir: &Path) -> Result<()> {
     if let Some(parent) = cache_dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
-
-    let update_info = if cache_dir.exists() {
-        sync_repo(&cache_dir)?
-    } else {
-        clone_repo(source, &cache_dir)?;
-        Some("initial".to_string())
-    };
-
-    Ok((cache_dir, update_info))
+    clone_repo(source, cache_dir)
 }
 
 fn clone_repo(source: &str, dest: &Path) -> Result<()> {
@@ -59,8 +67,8 @@ fn clone_repo(source: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Returns commit range (e.g. "abc123..def456") if new commits were fetched
-fn sync_repo(dest: &Path) -> Result<Option<String>> {
+/// Syncs an existing repo. Returns commit range (e.g. "abc123..def456") if new commits were fetched.
+pub fn sync_repo(dest: &Path) -> Result<Option<String>> {
     // git clone sets up tracking branches for both local and remote repos
     let has_upstream = Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "@{upstream}"])
@@ -128,29 +136,15 @@ fn sync_repo(dest: &Path) -> Result<Option<String>> {
     Ok(None)
 }
 
-fn get_cache_dir(source: &str) -> Result<PathBuf> {
-    let cache_base = dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("rollcron");
-
-    let repo_name = source
-        .trim_end_matches('/')
-        .trim_end_matches(".git")
-        .rsplit('/')
-        .next()
-        .unwrap_or("repo");
-
-    let hash = &format!("{:x}", hash_str(source))[..8];
-
-    Ok(cache_base.join(format!("{}-{}", repo_name, hash)))
-}
-
-fn hash_str(input: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    input.hash(&mut hasher);
-    hasher.finish()
+fn generate_random_suffix() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    // Use lower 32 bits of nanoseconds XOR'd with process ID for uniqueness
+    let unique = (nanos as u32) ^ std::process::id();
+    format!("{:08x}", unique)
 }
 
 pub fn get_job_dir(sot_path: &Path, job_id: &str) -> PathBuf {
@@ -252,13 +246,44 @@ pub fn sync_to_job_dir(sot_path: &Path, job_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Removes the sot_path and all associated job directories.
+pub fn cleanup_cache_dir(sot_path: &Path, job_ids: &[String]) {
+    use tracing::info;
+
+    // Remove job directories
+    for job_id in job_ids {
+        let job_dir = get_job_dir(sot_path, job_id);
+        if job_dir.exists() {
+            info!(path = %job_dir.display(), "Removing job directory");
+            let _ = std::fs::remove_dir_all(&job_dir);
+        }
+        // Also remove temp/old variants
+        let _ = std::fs::remove_dir_all(job_dir.with_extension("tmp"));
+        let _ = std::fs::remove_dir_all(job_dir.with_extension("old"));
+    }
+
+    // Remove sot_path
+    if sot_path.exists() {
+        info!(path = %sot_path.display(), "Removing cache directory");
+        let _ = std::fs::remove_dir_all(sot_path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn cache_dir_from_url() {
-        let dir = get_cache_dir("https://github.com/user/myrepo.git").unwrap();
+    fn cache_path_from_url() {
+        let dir = generate_cache_path("https://github.com/user/myrepo.git");
         assert!(dir.to_str().unwrap().contains("myrepo"));
+    }
+
+    #[test]
+    fn cache_path_is_random() {
+        let dir1 = generate_cache_path("https://github.com/user/repo.git");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let dir2 = generate_cache_path("https://github.com/user/repo.git");
+        assert_ne!(dir1, dir2);
     }
 }

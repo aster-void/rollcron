@@ -107,11 +107,13 @@ jobs:
 
 ```
 ~/.cache/rollcron/
-├── <repo>-<hash>/              # SoT: git repository
-└── <repo>-<hash>@<job-id>/     # Per-job snapshot (no .git)
+├── <repo>-<random>/              # SoT: git repository (random suffix per run)
+└── <repo>-<random>@<job-id>/     # Per-job snapshot (no .git)
 ```
 
-**Important**: Directory names use `job.id` (the YAML key), not `job.name`.
+**Important**:
+- Directory names use `job.id` (the YAML key), not `job.name`
+- Each run creates new directories with a random suffix (cleaned up on exit)
 
 ## Assumptions
 
@@ -142,6 +144,11 @@ jobs:
 3. If due: spawn task in job's directory (by ID) with timeout
 4. Apply task jitter (random delay 0 to jitter) before first execution
 5. On failure: apply exponential backoff + retry jitter before retry
+
+### Shutdown (Ctrl+C)
+1. Wait for running jobs to complete (graceful stop)
+2. Stop all job actors
+3. Remove all cache directories (sot_path + job dirs)
 
 ## Logging
 

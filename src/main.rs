@@ -5,7 +5,7 @@ mod git;
 mod logging;
 mod webhook;
 
-use actor::runner::{GracefulShutdown, Initialize, RunnerActor};
+use actor::runner::{GetJobIds, GracefulShutdown, Initialize, RunnerActor};
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
@@ -45,8 +45,9 @@ async fn main() -> Result<()> {
 
     info!(source = %source, pull_interval = args.pull_interval, "Starting rollcron");
 
-    // Initial sync
-    let (sot_path, _) = git::ensure_repo(&source)?;
+    // Initial clone
+    let sot_path = git::generate_cache_path(&source);
+    git::clone_to(&source, &sot_path)?;
     info!(cache = %sot_path.display(), "Repository ready");
 
     let (initial_runner, initial_jobs) = load_config(&sot_path)?;
@@ -54,9 +55,8 @@ async fn main() -> Result<()> {
     // Spawn Runner actor
     let runner = xtra::spawn_tokio(
         RunnerActor::new(
-            source,
             Duration::from_secs(args.pull_interval),
-            sot_path,
+            sot_path.clone(),
             initial_runner,
         ),
         Mailbox::unbounded(),
@@ -72,8 +72,14 @@ async fn main() -> Result<()> {
     tokio::signal::ctrl_c().await?;
     info!("Shutting down...");
 
+    // Get job IDs for cleanup
+    let job_ids = runner.send(GetJobIds).await.unwrap_or_default();
+
     // Graceful shutdown
     let _ = runner.send(GracefulShutdown).await;
+
+    // Cleanup cache directories
+    git::cleanup_cache_dir(&sot_path, &job_ids);
 
     Ok(())
 }

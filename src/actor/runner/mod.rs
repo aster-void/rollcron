@@ -16,7 +16,6 @@ const CONFIG_FILE: &str = "rollcron.yaml";
 
 /// Runner Actor - manages the lifecycle of all job actors
 pub struct RunnerActor {
-    source: String,
     pull_interval: Duration,
     sot_path: PathBuf,
     runner_config: RunnerConfig,
@@ -28,13 +27,11 @@ pub struct RunnerActor {
 
 impl RunnerActor {
     pub fn new(
-        source: String,
         pull_interval: Duration,
         sot_path: PathBuf,
         runner_config: RunnerConfig,
     ) -> Self {
         Self {
-            source,
             pull_interval,
             sot_path,
             runner_config,
@@ -67,11 +64,11 @@ impl Actor for RunnerActor {
         self.self_addr = Some(addr.clone());
 
         // Start git poll loop
-        let source = self.source.clone();
+        let sot_path = self.sot_path.clone();
         let pull_interval = self.pull_interval;
         let poll_addr = addr.clone();
         self.poll_handle = Some(tokio::spawn(async move {
-            git_poll::run(source, pull_interval, poll_addr).await;
+            git_poll::run(sot_path, pull_interval, poll_addr).await;
         }));
 
         // Start supervisor loop
@@ -242,6 +239,17 @@ impl Handler<RespawnJob> for RunnerActor {
         if let Some(job) = jobs.into_iter().find(|j| j.id == msg.job_id) {
             self.spawn_job_actor(job);
         }
+    }
+}
+
+/// Get all job IDs for cleanup
+pub struct GetJobIds;
+
+impl Handler<GetJobIds> for RunnerActor {
+    type Return = Vec<String>;
+
+    async fn handle(&mut self, _msg: GetJobIds, _ctx: &mut Context<Self>) -> Self::Return {
+        self.job_actors.keys().cloned().collect()
     }
 }
 

@@ -11,7 +11,7 @@ use xtra::refcount::Weak;
 
 const CONFIG_FILE: &str = "rollcron.yaml";
 
-pub async fn run<A>(source: String, pull_interval: Duration, addr: Address<A, Weak>)
+pub async fn run<A>(sot_path: PathBuf, pull_interval: Duration, addr: Address<A, Weak>)
 where
     A: Handler<ConfigUpdate> + Handler<GetRunnerConfig, Return = RunnerConfig>,
 {
@@ -20,7 +20,7 @@ where
     loop {
         ticker.tick().await;
 
-        let (sot_path, update_info) = match git::ensure_repo(&source) {
+        let update_info = match git::sync_repo(&sot_path) {
             Ok(r) => r,
             Err(e) => {
                 error!(target: "rollcron::runner", error = %e, "Git sync failed");
@@ -38,7 +38,7 @@ where
             Ok((runner, jobs)) => {
                 if let Err(e) = addr
                     .send(ConfigUpdate {
-                        sot_path,
+                        sot_path: sot_path.clone(),
                         runner,
                         jobs,
                     })
