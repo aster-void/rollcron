@@ -2,7 +2,7 @@ use super::{ConfigUpdate, GetRunnerConfig};
 use crate::config::{self, RunnerConfig};
 use crate::{env, git, webhook};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::time::interval;
 use tracing::{error, info, warn};
@@ -55,7 +55,7 @@ where
     }
 }
 
-async fn notify_config_error<A>(addr: &Address<A, Weak>, sot_path: &PathBuf, error: &str)
+async fn notify_config_error<A>(addr: &Address<A, Weak>, sot_path: &Path, error: &str)
 where
     A: Handler<GetRunnerConfig, Return = RunnerConfig>,
 {
@@ -83,7 +83,7 @@ where
     }
 }
 
-fn load_runner_env(sot_path: &PathBuf, runner: &RunnerConfig) -> Option<HashMap<String, String>> {
+fn load_runner_env(sot_path: &Path, runner: &RunnerConfig) -> Option<HashMap<String, String>> {
     let mut env_vars = HashMap::new();
 
     if let Some(env_file_path) = &runner.env_file {
@@ -107,7 +107,7 @@ fn load_runner_env(sot_path: &PathBuf, runner: &RunnerConfig) -> Option<HashMap<
     Some(env_vars)
 }
 
-fn load_config(sot_path: &PathBuf) -> anyhow::Result<(config::RunnerConfig, Vec<config::Job>)> {
+fn load_config(sot_path: &Path) -> anyhow::Result<(config::RunnerConfig, Vec<config::Job>)> {
     let config_path = sot_path.join(CONFIG_FILE);
     let content = std::fs::read_to_string(&config_path)
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", config_path.display(), e))?;

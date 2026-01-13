@@ -2,7 +2,7 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::sleep;
@@ -16,7 +16,7 @@ use crate::webhook::{self, JobFailure};
 /// Default jitter ratio when not explicitly configured (25% of base delay)
 const AUTO_JITTER_RATIO: u32 = 25;
 
-pub async fn execute_job(job: &Job, sot_path: &PathBuf, runner: &RunnerConfig) -> bool {
+pub async fn execute_job(job: &Job, sot_path: &Path, runner: &RunnerConfig) -> bool {
     let job_dir = git::get_job_dir(sot_path, &job.id);
     let work_dir = resolve_work_dir(sot_path, &job.id, &job.working_dir);
     let mut log_file = job
@@ -28,8 +28,8 @@ pub async fn execute_job(job: &Job, sot_path: &PathBuf, runner: &RunnerConfig) -
     let mut last_result: Option<CommandResult> = None;
 
     for attempt in 0..max_attempts {
-        if attempt > 0 {
-            if let Some(retry) = job.retry.as_ref() {
+        if attempt > 0
+            && let Some(retry) = job.retry.as_ref() {
                 let delay = calculate_backoff(retry, attempt - 1);
                 info!(
                     target: "rollcron::job",
@@ -41,7 +41,6 @@ pub async fn execute_job(job: &Job, sot_path: &PathBuf, runner: &RunnerConfig) -
                 );
                 sleep(delay).await;
             }
-        }
 
         info!(
             target: "rollcron::job",
@@ -116,7 +115,7 @@ pub async fn execute_job(job: &Job, sot_path: &PathBuf, runner: &RunnerConfig) -
     false
 }
 
-fn resolve_work_dir(sot_path: &PathBuf, job_id: &str, working_dir: &Option<String>) -> PathBuf {
+fn resolve_work_dir(sot_path: &Path, job_id: &str, working_dir: &Option<String>) -> PathBuf {
     let job_dir = git::get_job_dir(sot_path, job_id);
     match working_dir {
         Some(dir) => {
@@ -141,8 +140,8 @@ fn resolve_work_dir(sot_path: &PathBuf, job_id: &str, working_dir: &Option<Strin
 
 async fn run_command(
     job: &Job,
-    work_dir: &PathBuf,
-    sot_path: &PathBuf,
+    work_dir: &Path,
+    sot_path: &Path,
     runner: &RunnerConfig,
 ) -> CommandResult {
     let env_vars = match merge_env_vars(job, work_dir, sot_path, runner) {
@@ -180,7 +179,7 @@ async fn run_command(
 /// Load runner-level env vars for webhook URL expansion.
 /// Returns None on error (webhook will fall back to process env).
 fn load_runner_env_vars(
-    sot_path: &PathBuf,
+    sot_path: &Path,
     runner: &RunnerConfig,
 ) -> Option<HashMap<String, String>> {
     let mut env_vars = HashMap::new();
@@ -210,8 +209,8 @@ fn load_runner_env_vars(
 
 fn merge_env_vars(
     job: &Job,
-    work_dir: &PathBuf,
-    sot_path: &PathBuf,
+    work_dir: &Path,
+    sot_path: &Path,
     runner: &RunnerConfig,
 ) -> anyhow::Result<HashMap<String, String>> {
     let mut env_vars = HashMap::new();
@@ -319,26 +318,24 @@ fn generate_jitter(max: Duration) -> Duration {
 
 // === Logging ===
 
-fn rotate_log_file(path: &PathBuf, max_size: u64) {
-    if let Ok(meta) = fs::metadata(path) {
-        if meta.len() >= max_size {
+fn rotate_log_file(path: &Path, max_size: u64) {
+    if let Ok(meta) = fs::metadata(path)
+        && meta.len() >= max_size {
             let old_path = path.with_extension("log.old");
             let _ = fs::remove_file(&old_path);
             let _ = fs::rename(path, &old_path);
         }
-    }
 }
 
-fn create_log_file(job_dir: &PathBuf, log_path: &str, max_size: u64) -> Option<File> {
+fn create_log_file(job_dir: &Path, log_path: &str, max_size: u64) -> Option<File> {
     let expanded = env::expand_string(log_path);
     let full_path = job_dir.join(&expanded);
 
-    if let Some(parent) = full_path.parent() {
-        if let Err(e) = fs::create_dir_all(parent) {
+    if let Some(parent) = full_path.parent()
+        && let Err(e) = fs::create_dir_all(parent) {
             warn!(target: "rollcron::job", error = %e, "Failed to create log directory");
             return None;
         }
-    }
 
     rotate_log_file(&full_path, max_size);
 

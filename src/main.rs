@@ -8,7 +8,7 @@ mod webhook;
 use actor::runner::{GetJobIds, GracefulShutdown, Initialize, RunnerActor};
 use anyhow::{Context, Result};
 use clap::Parser;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{error, info};
 use xtra::prelude::*;
@@ -84,7 +84,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn load_config(sot_path: &PathBuf) -> Result<(config::RunnerConfig, Vec<config::Job>)> {
+fn load_config(sot_path: &Path) -> Result<(config::RunnerConfig, Vec<config::Job>)> {
     let config_path = sot_path.join(CONFIG_FILE);
     let content = std::fs::read_to_string(&config_path)
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", config_path.display(), e))?;
