@@ -167,9 +167,10 @@ impl Handler<ConfigUpdate> for RunnerActor {
                 // Update existing job (fire-and-forget)
                 let addr = addr.clone();
                 let sot_path = msg.sot_path.clone();
+                let runner = self.runner_config.clone();
                 tokio::spawn(async move {
                     let _ = addr.send(SyncNeeded { sot_path }).await;
-                    let _ = addr.send(Update(job)).await;
+                    let _ = addr.send(Update { job, runner }).await;
                 });
             } else {
                 // Create new job

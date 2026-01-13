@@ -187,13 +187,17 @@ impl Handler<Tick> for JobActor {
 }
 
 /// Update job configuration
-pub struct Update(pub Job);
+pub struct Update {
+    pub job: Job,
+    pub runner: RunnerConfig,
+}
 
 impl Handler<Update> for JobActor {
     type Return = ();
 
     async fn handle(&mut self, msg: Update, _ctx: &mut Context<Self>) {
-        self.job = msg.0;
+        self.job = msg.job;
+        self.runner = msg.runner;
         self.update_config();
         info!(target: "rollcron::job", job_id = %self.job.id, "Job config updated");
     }
