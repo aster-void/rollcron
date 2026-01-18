@@ -267,15 +267,17 @@ Full form:
 
 **Schedule**: Cron or English phrase
 
-- Cron: `min hour day month weekday` (e.g., `*/5 * * * *` = every 5 minutes)
+- Cron: `min hour day month weekday` (e.g., `*/5 * * * *`)
 - English examples:
   - `every 5 minutes`
   - `every day at 16:00`
   - `7pm every Thursday`
-  - `Sunday at 12:00`
-  - `midnight on Tuesdays`
-- 24-hour format preferred
-- 12-hour edge case: `12 am` = midnight (00:00), `12 pm` = noon (12:00)
+  - `noon` / `midnight`
+
+Notes:
+- Minutes required: `at 12:00` works, `at 12` does not
+- `every day` is optional: `noon` = `noon every day`
+- Avoid `12 am`/`12 pm`: use `noon`/`midnight` or `0:00`/`12:00`
 
 ### Environment variable priority
 

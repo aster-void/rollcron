@@ -187,6 +187,30 @@ mod tests {
     }
 
     #[test]
+    fn english_24h_requires_minutes() {
+        // "every day at 12" is NOT supported - library misparses it
+        let bad = english_to_cron::str_cron_syntax("every day at 12").unwrap();
+        assert_eq!(bad, "0 0 0 */1 * ? *"); // wrong!
+
+        // Must use "12:00" format
+        let good = english_to_cron::str_cron_syntax("every day at 12:00").unwrap();
+        assert_eq!(good, "0 0 12 */1 * ? *");
+    }
+
+    #[test]
+    fn english_noon_and_midnight() {
+        // "every day" is optional
+        assert_eq!(
+            english_to_cron::str_cron_syntax("noon").unwrap(),
+            english_to_cron::str_cron_syntax("noon every day").unwrap()
+        );
+        assert_eq!(
+            english_to_cron::str_cron_syntax("midnight").unwrap(),
+            english_to_cron::str_cron_syntax("midnight every day").unwrap()
+        );
+    }
+
+    #[test]
     fn english_7pm_every_thursday() {
         let schedule = parse_schedule("7pm every Thursday");
         // 2025-01-15 is Wednesday
