@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
@@ -59,7 +59,9 @@ pub async fn execute_build(job: &Job, sot_path: &Path, runner: &RunnerConfig) ->
         write_log_marker(file, &runner.timezone, job.timezone.as_ref(), "Build started");
     }
 
+    let start_time = Instant::now();
     let result = run_build_command(job, build_config, &build_dir, sot_path, runner).await;
+    let duration = start_time.elapsed();
 
     match &result {
         BuildCommandResult::Completed(output) if output.status.success() => {
@@ -67,7 +69,8 @@ pub async fn execute_build(job: &Job, sot_path: &Path, runner: &RunnerConfig) ->
             if let Some(ref mut file) = log_file {
                 let _ = file.write_all(&output.stdout);
                 let _ = file.write_all(&output.stderr);
-                write_log_marker(file, &runner.timezone, job.timezone.as_ref(), "Build finished (success)");
+                let marker = format!("Build finished (success) [{}]", format_duration(duration));
+                write_log_marker(file, &runner.timezone, job.timezone.as_ref(), &marker);
             }
             BuildResult::Success
         }
@@ -83,7 +86,7 @@ pub async fn execute_build(job: &Job, sot_path: &Path, runner: &RunnerConfig) ->
             if let Some(ref mut file) = log_file {
                 let _ = file.write_all(&output.stdout);
                 let _ = file.write_all(&output.stderr);
-                let marker = format!("Build finished (failed, exit code {:?})", output.status.code());
+                let marker = format!("Build finished (failed, exit code {:?}) [{}]", output.status.code(), format_duration(duration));
                 write_log_marker(file, &runner.timezone, job.timezone.as_ref(), &marker);
             }
 
@@ -116,7 +119,7 @@ pub async fn execute_build(job: &Job, sot_path: &Path, runner: &RunnerConfig) ->
 
             if let Some(ref mut file) = log_file {
                 let _ = writeln!(file, "[rollcron] Error: {}", e);
-                let marker = format!("Build finished (error: {})", e);
+                let marker = format!("Build finished (error: {}) [{}]", e, format_duration(duration));
                 write_log_marker(file, &runner.timezone, job.timezone.as_ref(), &marker);
             }
 
@@ -148,7 +151,7 @@ pub async fn execute_build(job: &Job, sot_path: &Path, runner: &RunnerConfig) ->
 
             if let Some(ref mut file) = log_file {
                 let _ = writeln!(file, "[rollcron] Timeout after {:?}", build_config.timeout);
-                let marker = format!("Build finished (timeout after {:?})", build_config.timeout);
+                let marker = format!("Build finished (timeout after {:?}) [{}]", build_config.timeout, format_duration(duration));
                 write_log_marker(file, &runner.timezone, job.timezone.as_ref(), &marker);
             }
 
@@ -362,8 +365,10 @@ pub async fn execute_job(job: &Job, sot_path: &Path, runner: &RunnerConfig) -> b
             write_log_marker(file, &runner.timezone, job.timezone.as_ref(), &marker);
         }
 
+        let start_time = Instant::now();
         let result = run_command(job, &work_dir, sot_path, runner).await;
-        let success = handle_result(job, &result, log_file.as_mut(), &runner.timezone);
+        let duration = start_time.elapsed();
+        let success = handle_result(job, &result, log_file.as_mut(), &runner.timezone, duration);
 
         if success {
             return true;
@@ -658,7 +663,7 @@ enum CommandResult {
     Timeout,
 }
 
-fn handle_result(job: &Job, result: &CommandResult, log_file: Option<&mut File>, runner_tz: &TimezoneConfig) -> bool {
+fn handle_result(job: &Job, result: &CommandResult, log_file: Option<&mut File>, runner_tz: &TimezoneConfig, duration: Duration) -> bool {
     match result {
         CommandResult::Completed(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -669,9 +674,9 @@ fn handle_result(job: &Job, result: &CommandResult, log_file: Option<&mut File>,
                 let _ = file.write_all(stdout.as_bytes());
                 let _ = file.write_all(stderr.as_bytes());
                 let marker = if success {
-                    "Job finished (success)".to_string()
+                    format!("Job finished (success) [{}]", format_duration(duration))
                 } else {
-                    format!("Job finished (failed, exit code {:?})", output.status.code())
+                    format!("Job finished (failed, exit code {:?}) [{}]", output.status.code(), format_duration(duration))
                 };
                 write_log_marker(file, runner_tz, job.timezone.as_ref(), &marker);
             }
@@ -692,7 +697,7 @@ fn handle_result(job: &Job, result: &CommandResult, log_file: Option<&mut File>,
             error!(target: "rollcron::job", job_id = %job.id, error = %e, "Failed to execute");
             if let Some(file) = log_file {
                 let _ = writeln!(file, "[rollcron] Error: {}", e);
-                let marker = format!("Job finished (error: {})", e);
+                let marker = format!("Job finished (error: {}) [{}]", e, format_duration(duration));
                 write_log_marker(file, runner_tz, job.timezone.as_ref(), &marker);
             }
             false
@@ -701,7 +706,7 @@ fn handle_result(job: &Job, result: &CommandResult, log_file: Option<&mut File>,
             error!(target: "rollcron::job", job_id = %job.id, timeout = ?job.timeout, "Timeout");
             if let Some(file) = log_file {
                 let _ = writeln!(file, "[rollcron] Timeout after {:?}", job.timeout);
-                let marker = format!("Job finished (timeout after {:?})", job.timeout);
+                let marker = format!("Job finished (timeout after {:?}) [{}]", job.timeout, format_duration(duration));
                 write_log_marker(file, runner_tz, job.timezone.as_ref(), &marker);
             }
             false
@@ -775,6 +780,20 @@ fn format_timestamp(runner_tz: &TimezoneConfig, job_tz: Option<&TimezoneConfig>)
         TimezoneConfig::Utc => Utc::now().format(fmt).to_string(),
         TimezoneConfig::Inherit => Local::now().format(fmt).to_string(),
         TimezoneConfig::Named(tz) => Utc::now().with_timezone(tz).format(fmt).to_string(),
+    }
+}
+
+fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    let millis = d.subsec_millis();
+    if secs >= 3600 {
+        format!("{}h {}m {}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+    } else if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else if secs > 0 {
+        format!("{}.{:03}s", secs, millis)
+    } else {
+        format!("{}ms", millis)
     }
 }
 
