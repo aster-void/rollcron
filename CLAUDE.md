@@ -29,32 +29,48 @@ src/
 
 ```rust
 // config.rs - Raw config structs (deserialized from YAML)
-struct BuildConfigRaw {
-    sh: String,            // Build command (runs in build/ dir)
-    timeout: Option<String>,
-    env_file: Option<String>,
-    env: Option<HashMap<String, String>>,
-    working_dir: Option<String>,
+// All support shorthand (string) or full (object) form via #[serde(untagged)]
+
+enum ScheduleConfigRaw {
+    Simple(String),        // "*/5 * * * *"
+    Full { cron: String, timezone: Option<String> },
 }
 
-struct RunConfigRaw {
-    sh: String,            // Run command (runs in run/ dir)
-    timeout: String,       // Default: "1h"
-    concurrency: Concurrency,
-    retry: Option<RetryConfigRaw>,
-    working_dir: Option<String>,
-    env_file: Option<String>,
-    env: Option<HashMap<String, String>>,
+enum BuildConfigRaw {
+    Simple(String),        // "cargo build"
+    Full {
+        sh: String,
+        timeout: Option<String>,
+        env_file: Option<String>,
+        env: Option<HashMap<String, String>>,
+        working_dir: Option<String>,
+    },
 }
 
-struct LogConfigRaw {
-    file: Option<String>,  // Path to log file (relative to run dir)
-    max_size: String,      // Default: "10M"
+enum RunConfigRaw {
+    Simple(String),        // "./app"
+    Full {
+        sh: String,
+        timeout: String,       // Default: "1h"
+        concurrency: Concurrency,
+        retry: Option<RetryConfigRaw>,
+        working_dir: Option<String>,
+        env_file: Option<String>,
+        env: Option<HashMap<String, String>>,
+    },
+}
+
+enum LogConfigRaw {
+    Simple(String),        // "output.log"
+    Full {
+        file: Option<String>,
+        max_size: String,      // Default: "10M"
+    },
 }
 
 struct JobConfig {
     name: Option<String>,
-    schedule: ScheduleConfig,
+    schedule: ScheduleConfigRaw,
     build: Option<BuildConfigRaw>,
     run: RunConfigRaw,
     log: Option<LogConfigRaw>,
@@ -110,11 +126,31 @@ struct RunnerConfig {
     env_file: Option<String>,  // Path to .env file (relative to repo root)
     env: Option<HashMap<String, String>>,  // Inline env vars
 }
-
-struct ScheduleConfig { cron: String, timezone: Option<String> }
 ```
 
 ## Config Format
+
+### Minimal (shorthand syntax)
+
+```yaml
+jobs:
+  hello:
+    schedule: "*/5 * * * *"   # Shorthand for { cron: "..." }
+    run: echo hello           # Shorthand for { sh: "..." }
+```
+
+### With build step
+
+```yaml
+jobs:
+  my-app:
+    schedule: "0 * * * *"
+    build: cargo build        # Shorthand for { sh: "..." }
+    run: ./target/debug/app
+    log: output.log           # Shorthand for { file: "..." }
+```
+
+### Full syntax (all options)
 
 ```yaml
 runner:                        # Optional: global settings
@@ -130,14 +166,14 @@ runner:                        # Optional: global settings
 jobs:
   <job-id>:                  # Key = ID (used for directories)
     name: "Display Name"     # Optional (defaults to job-id)
-    schedule:
+    schedule:                # String or object
       cron: "*/5 * * * *"
       timezone: Asia/Tokyo   # Optional: job-level timezone override
-    build:                   # Optional: build configuration
+    build:                   # Optional: string or object
       sh: cargo build        # Build command (runs in build/ directory)
       timeout: 30m           # Optional: timeout for build (defaults to run.timeout)
       working_dir: ./subdir  # Optional: working directory (relative to build dir)
-    run:                     # Run configuration
+    run:                     # String or object
       sh: ./target/debug/app # Run command (runs in run/ directory)
       timeout: 10s           # Optional (default: 1h)
       concurrency: skip      # Optional: parallel|wait|skip|replace (default: skip)
@@ -147,7 +183,7 @@ jobs:
         delay: 1s            # Initial delay (default: 1s), exponential backoff
         jitter: 500ms        # Optional: random variation 0-500ms added to retry delay
                              # If omitted, auto-inferred as 25% of delay (e.g., 250ms for 1s delay)
-    log:                     # Optional: logging configuration
+    log:                     # Optional: string or object
       file: output.log       # File path for stdout/stderr
       max_size: 10M          # Max size before rotation (default: 10M)
     working_dir: ./subdir    # Optional: working directory for build & run (can be overridden)
@@ -226,13 +262,19 @@ mise exec -- cargo test     # Run tests
 
 ## Logging
 
-When `log.file` is set, command stdout/stderr is appended to the specified file. If not set, output is discarded.
+When `log` is set, command stdout/stderr is appended to the specified file. If not set, output is discarded.
 
 ```yaml
 jobs:
   backup:
-    run:
-      sh: ./scripts/backup.sh
+    schedule: "0 2 * * *"
+    run: ./scripts/backup.sh
+    log: backup.log           # Shorthand: written to <job_dir>/backup.log
+
+  # Or with rotation settings:
+  backup-full:
+    schedule: "0 2 * * *"
+    run: ./scripts/backup.sh
     log:
       file: backup.log        # Written to <job_dir>/backup.log
       max_size: 50M           # Rotate when file exceeds 50MB
@@ -280,8 +322,7 @@ runner:
 
 jobs:
   my-job:
-    schedule:
-      cron: "* * * * *"
+    schedule: "* * * * *"
     build:
       sh: cargo build
       env_file: .env.build   # Build-specific

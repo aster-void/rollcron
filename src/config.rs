@@ -110,8 +110,18 @@ struct Config {
     jobs: HashMap<String, JobConfig>,
 }
 
+/// Build configuration - supports shorthand string or full object
 #[derive(Debug, Deserialize)]
-pub struct BuildConfigRaw {
+#[serde(untagged)]
+pub enum BuildConfigRaw {
+    /// Shorthand: `build: "cargo build"`
+    Simple(String),
+    /// Full: `build: { sh: "cargo build", timeout: "30m", ... }`
+    Full(BuildConfigFull),
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BuildConfigFull {
     pub sh: String,
     pub timeout: Option<String>,
     pub env_file: Option<String>,
@@ -119,8 +129,18 @@ pub struct BuildConfigRaw {
     pub working_dir: Option<String>,
 }
 
+/// Run configuration - supports shorthand string or full object
 #[derive(Debug, Deserialize)]
-pub struct RunConfigRaw {
+#[serde(untagged)]
+pub enum RunConfigRaw {
+    /// Shorthand: `run: "./app"`
+    Simple(String),
+    /// Full: `run: { sh: "./app", timeout: "5m", ... }`
+    Full(RunConfigFull),
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RunConfigFull {
     pub sh: String,
     #[serde(default = "default_timeout")]
     pub timeout: String,
@@ -132,8 +152,18 @@ pub struct RunConfigRaw {
     pub env: Option<HashMap<String, String>>,
 }
 
+/// Log configuration - supports shorthand string or full object
 #[derive(Debug, Deserialize)]
-pub struct LogConfigRaw {
+#[serde(untagged)]
+pub enum LogConfigRaw {
+    /// Shorthand: `log: "output.log"`
+    Simple(String),
+    /// Full: `log: { file: "output.log", max_size: "50M" }`
+    Full(LogConfigFull),
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LogConfigFull {
     pub file: Option<String>,
     #[serde(default = "default_log_max_size")]
     pub max_size: String,
@@ -142,7 +172,7 @@ pub struct LogConfigRaw {
 #[derive(Debug, Deserialize)]
 pub struct JobConfig {
     pub name: Option<String>,
-    pub schedule: ScheduleConfig,
+    pub schedule: ScheduleConfigRaw,
     pub build: Option<BuildConfigRaw>,
     pub run: RunConfigRaw,
     pub log: Option<LogConfigRaw>,
@@ -167,8 +197,18 @@ fn default_retry_delay() -> String {
     "1s".to_string()
 }
 
+/// Schedule configuration - supports shorthand string or full object
 #[derive(Debug, Deserialize)]
-pub struct ScheduleConfig {
+#[serde(untagged)]
+pub enum ScheduleConfigRaw {
+    /// Shorthand: `schedule: "*/5 * * * *"`
+    Simple(String),
+    /// Full: `schedule: { cron: "*/5 * * * *", timezone: "Asia/Tokyo" }`
+    Full(ScheduleConfigFull),
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ScheduleConfigFull {
     pub cron: String,
     pub timezone: Option<String>,
 }
@@ -267,35 +307,58 @@ fn parse_job(
 ) -> Result<Job> {
     validate_job_id(id)?;
 
-    let schedule = Cron::from_str(&job.schedule.cron)
-        .map_err(|e| anyhow!("Invalid cron '{}': {}", job.schedule.cron, e))?;
+    // Extract schedule config
+    let (cron_expr, schedule_timezone) = match job.schedule {
+        ScheduleConfigRaw::Simple(cron) => (cron, None),
+        ScheduleConfigRaw::Full(full) => (full.cron, full.timezone),
+    };
 
-    let timeout = parse_duration(&job.run.timeout)
-        .map_err(|e| anyhow!("Invalid run.timeout '{}': {}", job.run.timeout, e))?;
+    let schedule = Cron::from_str(&cron_expr)
+        .map_err(|e| anyhow!("Invalid cron '{}': {}", cron_expr, e))?;
 
+    // Extract run config
+    let (run_sh, run_timeout, run_concurrency, run_retry, run_working_dir, run_env_file, run_env) =
+        match job.run {
+            RunConfigRaw::Simple(sh) => (sh, default_timeout(), Concurrency::default(), None, None, None, None),
+            RunConfigRaw::Full(full) => (
+                full.sh,
+                full.timeout,
+                full.concurrency,
+                full.retry,
+                full.working_dir,
+                full.env_file,
+                full.env,
+            ),
+        };
+
+    let timeout = parse_duration(&run_timeout)
+        .map_err(|e| anyhow!("Invalid run.timeout '{}': {}", run_timeout, e))?;
+
+    // Extract build config
     let build = job
         .build
         .map(|b| {
-            let build_timeout = b
-                .timeout
+            let (build_sh, build_timeout_str, build_env_file, build_env, build_working_dir) = match b {
+                BuildConfigRaw::Simple(sh) => (sh, None, None, None, None),
+                BuildConfigRaw::Full(full) => (full.sh, full.timeout, full.env_file, full.env, full.working_dir),
+            };
+            let build_timeout = build_timeout_str
                 .map(|t| parse_duration(&t).map_err(|e| anyhow!("Invalid build.timeout '{}': {}", t, e)))
                 .transpose()?
                 .unwrap_or(timeout);
             Ok::<_, anyhow::Error>(BuildConfig {
-                command: b.sh,
+                command: build_sh,
                 timeout: build_timeout,
-                env_file: b.env_file,
-                env: b.env,
-                working_dir: b.working_dir.or_else(|| job.working_dir.clone()),
+                env_file: build_env_file,
+                env: build_env,
+                working_dir: build_working_dir.or_else(|| job.working_dir.clone()),
             })
         })
         .transpose()?;
 
     let name = job.name.unwrap_or_else(|| id.to_string());
 
-    let retry = job
-        .run
-        .retry
+    let retry = run_retry
         .map(|r| {
             if r.max == 0 {
                 anyhow::bail!(
@@ -316,9 +379,7 @@ fn parse_job(
         })
         .transpose()?;
 
-    let job_timezone = job
-        .schedule
-        .timezone
+    let job_timezone = schedule_timezone
         .map(|tz| {
             if tz == "inherit" {
                 Ok(TimezoneConfig::Inherit)
@@ -336,7 +397,8 @@ fn parse_job(
     webhook.extend(job.webhook);
 
     let (log_file, log_max_size) = match job.log {
-        Some(log) => {
+        Some(LogConfigRaw::Simple(file)) => (Some(file), parse_size(&default_log_max_size()).unwrap()),
+        Some(LogConfigRaw::Full(log)) => {
             let max_size =
                 parse_size(&log.max_size).map_err(|e| anyhow!("Invalid log.max_size: {}", e))?;
             (log.file, max_size)
@@ -349,17 +411,17 @@ fn parse_job(
         name,
         schedule,
         build,
-        command: job.run.sh,
+        command: run_sh,
         timeout,
-        concurrency: job.run.concurrency,
+        concurrency: run_concurrency,
         retry,
-        working_dir: job.run.working_dir.or(job.working_dir),
+        working_dir: run_working_dir.or(job.working_dir),
         enabled: job.enabled.unwrap_or(true),
         timezone: job_timezone,
         env_file: job.env_file,
         env: job.env,
-        run_env_file: job.run.env_file,
-        run_env: job.run.env,
+        run_env_file,
+        run_env,
         webhook,
         log_file,
         log_max_size,
@@ -1405,5 +1467,96 @@ jobs:
             jobs[0].run_env.as_ref().unwrap().get("RUN_VAR"),
             Some(&"run".to_string())
         );
+    }
+
+    #[test]
+    fn parse_shorthand_schedule() {
+        let yaml = r#"
+jobs:
+  hello:
+    schedule: "*/5 * * * *"
+    run:
+      sh: echo hello
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].command, "echo hello");
+    }
+
+    #[test]
+    fn parse_shorthand_run() {
+        let yaml = r#"
+jobs:
+  hello:
+    schedule:
+      cron: "*/5 * * * *"
+    run: echo hello
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs[0].command, "echo hello");
+        assert_eq!(jobs[0].timeout, Duration::from_secs(3600)); // default
+        assert_eq!(jobs[0].concurrency, Concurrency::Skip); // default
+    }
+
+    #[test]
+    fn parse_shorthand_build() {
+        let yaml = r#"
+jobs:
+  hello:
+    schedule: "0 * * * *"
+    build: cargo build --release
+    run: ./target/release/app
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        let build = jobs[0].build.as_ref().unwrap();
+        assert_eq!(build.command, "cargo build --release");
+        assert_eq!(jobs[0].command, "./target/release/app");
+    }
+
+    #[test]
+    fn parse_shorthand_log() {
+        let yaml = r#"
+jobs:
+  hello:
+    schedule: "*/5 * * * *"
+    run: echo hello
+    log: output.log
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs[0].log_file.as_deref(), Some("output.log"));
+        assert_eq!(jobs[0].log_max_size, 10 * 1024 * 1024); // default 10M
+    }
+
+    #[test]
+    fn parse_all_shorthand() {
+        let yaml = r#"
+jobs:
+  hello:
+    schedule: "*/5 * * * *"
+    build: make
+    run: ./app
+    log: app.log
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs[0].build.as_ref().unwrap().command, "make");
+        assert_eq!(jobs[0].command, "./app");
+        assert_eq!(jobs[0].log_file.as_deref(), Some("app.log"));
+    }
+
+    #[test]
+    fn parse_mixed_shorthand_and_full() {
+        let yaml = r#"
+jobs:
+  hello:
+    schedule: "*/5 * * * *"
+    run:
+      sh: ./app
+      timeout: 30s
+    log: app.log
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs[0].command, "./app");
+        assert_eq!(jobs[0].timeout, Duration::from_secs(30));
+        assert_eq!(jobs[0].log_file.as_deref(), Some("app.log"));
     }
 }

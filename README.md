@@ -15,10 +15,8 @@ cargo install --path .
 ```yaml
 jobs:
   hello:
-    schedule:
-      cron: "*/5 * * * *"
-    run:
-      sh: echo "Hello from rollcron!"
+    schedule: "*/5 * * * *"
+    run: echo "Hello from rollcron!"
 ```
 
 3. Run:
@@ -42,8 +40,7 @@ rollcron https://github.com/user/repo --pull-interval 300
 jobs:
   backup:
     name: "Daily Backup"
-    schedule:
-      cron: "0 2 * * *"
+    schedule: "0 2 * * *"
     run:
       sh: ./scripts/backup.sh
       timeout: 5m
@@ -57,14 +54,9 @@ jobs:
 ```yaml
 jobs:
   my-app:
-    schedule:
-      cron: "0 * * * *"
-    build:
-      sh: cargo build --release
-      timeout: 30m
-    run:
-      sh: ./target/release/app
-      timeout: 10s
+    schedule: "0 * * * *"
+    build: cargo build --release
+    run: ./target/release/app
 ```
 
 ### Docker
@@ -72,8 +64,7 @@ jobs:
 ```yaml
 jobs:
   docker-job:
-    schedule:
-      cron: "*/10 * * * *"
+    schedule: "*/10 * * * *"
     run:
       sh: docker run --rm -v $(pwd):/app -w /app node:20 npm test
       timeout: 5m
@@ -90,8 +81,7 @@ runner:
 
 jobs:
   deploy:
-    schedule:
-      cron: "0 0 * * *"
+    schedule: "0 0 * * *"
     run:
       sh: ./deploy.sh
       timeout: 10m
@@ -116,6 +106,7 @@ jobs:
     name: "Build & Run App"
     schedule:
       cron: "0 * * * *"
+      timezone: Asia/Tokyo
     build:
       sh: cargo build --release
       timeout: 30m
@@ -175,15 +166,32 @@ Options:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | string, optional | job-id | Display name |
-| `schedule.cron` | string | **required** | Cron expression (5 fields: min hour day month weekday) |
-| `schedule.timezone` | string, optional | runner's | Job-specific timezone override |
+| `schedule` | string or object | **required** | Cron expression or `{ cron, timezone? }` |
+| `build` | string or object, optional | - | Build command or full config |
+| `run` | string or object | **required** | Run command or full config |
+| `log` | string or object, optional | - | Log file path or full config |
 | `enabled` | bool, optional | `true` | Enable/disable job |
 | `working_dir` | string, optional | - | Working directory for build and run (can be overridden) |
 | `env_file` | string, optional | - | Shared .env file for build and run |
 | `env` | map, optional | - | Shared environment variables for build and run |
 | `webhook` | list, optional | - | Job-specific webhooks (extends runner webhooks) |
 
+#### `jobs.<job-id>.schedule`
+
+Shorthand: `schedule: "*/5 * * * *"`
+
+Full form:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `cron` | string | **required** | Cron expression (5 fields: min hour day month weekday) |
+| `timezone` | string, optional | runner's | Job-specific timezone override |
+
 #### `jobs.<job-id>.build` (optional)
+
+Shorthand: `build: "cargo build --release"`
+
+Full form:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -194,6 +202,10 @@ Options:
 | `env` | map, optional | - | Build-specific environment variables |
 
 #### `jobs.<job-id>.run`
+
+Shorthand: `run: "./app"`
+
+Full form:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -213,6 +225,10 @@ Options:
 | `jitter` | duration, optional | 25% of delay | Random variation added to delay |
 
 #### `jobs.<job-id>.log` (optional)
+
+Shorthand: `log: "output.log"`
+
+Full form:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
