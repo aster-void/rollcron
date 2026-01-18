@@ -28,26 +28,66 @@ src/
 ## Key Types
 
 ```rust
-// config.rs
+// config.rs - Raw config structs (deserialized from YAML)
+struct BuildConfigRaw {
+    sh: String,            // Build command (runs in build/ dir)
+    timeout: Option<String>,
+    env_file: Option<String>,
+    env: Option<HashMap<String, String>>,
+}
+
+struct RunConfigRaw {
+    sh: String,            // Run command (runs in run/ dir)
+    timeout: String,       // Default: "1h"
+    concurrency: Concurrency,
+    retry: Option<RetryConfigRaw>,
+    working_dir: Option<String>,
+    env_file: Option<String>,
+    env: Option<HashMap<String, String>>,
+}
+
+struct LogConfigRaw {
+    file: Option<String>,  // Path to log file (relative to run dir)
+    max_size: String,      // Default: "10M"
+}
+
+struct JobConfig {
+    name: Option<String>,
+    schedule: ScheduleConfig,
+    build: Option<BuildConfigRaw>,
+    run: RunConfigRaw,
+    log: Option<LogConfigRaw>,
+    enabled: Option<bool>,
+    env_file: Option<String>,
+    env: Option<HashMap<String, String>>,
+    webhook: Vec<WebhookConfig>,
+}
+
+// config.rs - Runtime structs (parsed and validated)
 struct BuildConfig {
     command: String,      // Build command (runs in build/ dir)
-    timeout: Duration,    // Timeout for build (defaults to job timeout)
+    timeout: Duration,    // Timeout for build (defaults to run.timeout)
+    env_file: Option<String>,     // From build.env_file
+    env: Option<HashMap<String, String>>,  // From build.env
 }
 
 struct Job {
     id: String,           // Key from YAML (used for directories)
     name: String,         // Display name (defaults to id)
     schedule: croner::Cron,
-    build: Option<BuildConfig>,  // Optional build configuration
-    command: String,
-    timeout: Duration,
+    build: Option<BuildConfig>,
+    command: String,      // From run.sh
+    timeout: Duration,    // From run.timeout
     concurrency: Concurrency,
     retry: Option<RetryConfig>,
-    log_file: Option<String>,  // Path to log file (relative to run dir)
-    log_max_size: u64,         // Max log size before rotation (default: 10M)
-    env_file: Option<String>,  // Path to .env file (relative to job dir)
-    env: Option<HashMap<String, String>>,  // Inline env vars
-    webhook: Vec<WebhookConfig>,  // Failure notifications (inherited from runner + job-level)
+    working_dir: Option<String>,  // From run.working_dir
+    log_file: Option<String>,     // From log.file
+    log_max_size: u64,            // From log.max_size
+    env_file: Option<String>,     // Job-level (shared by build & run)
+    env: Option<HashMap<String, String>>,
+    run_env_file: Option<String>, // From run.env_file
+    run_env: Option<HashMap<String, String>>,  // From run.env
+    webhook: Vec<WebhookConfig>,
 }
 
 struct WebhookConfig {
@@ -68,10 +108,7 @@ struct RunnerConfig {
     env: Option<HashMap<String, String>>,  // Inline env vars
 }
 
-// Parsed from rollcron.yaml
-struct Config { jobs: HashMap<String, JobConfig> }
-struct JobConfig { name: Option<String>, schedule: ScheduleConfig, run, timeout }
-struct ScheduleConfig { cron: String }
+struct ScheduleConfig { cron: String, timezone: Option<String> }
 ```
 
 ## Config Format
@@ -92,22 +129,28 @@ jobs:
     name: "Display Name"     # Optional (defaults to job-id)
     schedule:
       cron: "*/5 * * * *"
+      timezone: Asia/Tokyo   # Optional: job-level timezone override
     build:                   # Optional: build configuration
-      run: cargo build       # Build command (runs in build/ directory)
-      timeout: 30m           # Optional: timeout for build (defaults to job timeout)
-    run: ./target/debug/app  # Run command (runs in run/ directory)
-    timeout: 10s             # Optional (default: 1h)
-    concurrency: skip        # Optional: parallel|wait|skip|replace (default: skip)
-    retry:                   # Optional
-      max: 3                 # Max retry attempts
-      delay: 1s              # Initial delay (default: 1s), exponential backoff
-      jitter: 500ms          # Optional: random variation 0-500ms added to retry delay
+      sh: cargo build        # Build command (runs in build/ directory)
+      timeout: 30m           # Optional: timeout for build (defaults to run.timeout)
+    run:                     # Run configuration
+      sh: ./target/debug/app # Run command (runs in run/ directory)
+      timeout: 10s           # Optional (default: 1h)
+      concurrency: skip      # Optional: parallel|wait|skip|replace (default: skip)
+      working_dir: ./subdir  # Optional: working directory (relative to run dir)
+      retry:                 # Optional
+        max: 3               # Max retry attempts
+        delay: 1s            # Initial delay (default: 1s), exponential backoff
+        jitter: 500ms        # Optional: random variation 0-500ms added to retry delay
                              # If omitted, auto-inferred as 25% of delay (e.g., 250ms for 1s delay)
-    log_file: output.log     # Optional: file path for stdout/stderr
-    log_max_size: 10M        # Optional: max size before rotation (default: 10M)
+    log:                     # Optional: logging configuration
+      file: output.log       # File path for stdout/stderr
+      max_size: 10M          # Max size before rotation (default: 10M)
     env_file: .env           # Optional: load env vars from file (relative to job dir)
     env:                     # Optional: inline env vars
       KEY: value
+    webhook:                 # Optional: job-level webhooks (extend runner webhooks)
+      - url: https://...
 ```
 
 ## Runtime Directory Layout
@@ -169,17 +212,19 @@ jobs:
 
 ## Logging
 
-When `log_file` is set, command stdout/stderr is appended to the specified file. If not set, output is discarded.
+When `log.file` is set, command stdout/stderr is appended to the specified file. If not set, output is discarded.
 
 ```yaml
 jobs:
   backup:
-    run: ./scripts/backup.sh
-    log_file: backup.log      # Written to <job_dir>/backup.log
-    log_max_size: 50M         # Rotate when file exceeds 50MB
+    run:
+      sh: ./scripts/backup.sh
+    log:
+      file: backup.log        # Written to <job_dir>/backup.log
+      max_size: 50M           # Rotate when file exceeds 50MB
 ```
 
-**Rotation**: When log file exceeds `log_max_size`:
+**Rotation**: When log file exceeds `log.max_size`:
 1. `backup.log` → `backup.log.old`
 2. Previous `.old` is deleted
 3. New `backup.log` created
@@ -211,7 +256,7 @@ runner:
 
 ## Environment Variables
 
-Environment variables can be set at runner (global) or job level, via inline definitions or `.env` files.
+Environment variables can be set at runner, job, build, or run level.
 
 ```yaml
 runner:
@@ -221,14 +266,31 @@ runner:
 
 jobs:
   my-job:
-    env_file: .env.local     # Loaded from job directory
+    schedule:
+      cron: "* * * * *"
+    build:
+      sh: cargo build
+      env_file: .env.build   # Build-specific
+      env:
+        CARGO_INCREMENTAL: "1"
+    run:
+      sh: ./app
+      env_file: .env.run     # Run-specific
+      env:
+        NODE_ENV: production
+    env_file: .env.job       # Shared by build and run
     env:
       JOB_VAR: value
 ```
 
-**Priority** (later overrides earlier):
+**Priority for build** (later overrides earlier):
 ```
-host ENV < runner.env_file < runner.env < job.env_file < job.env
+host ENV < runner.env_file < runner.env < job.env_file < job.env < build.env_file < build.env
+```
+
+**Priority for run** (later overrides earlier):
+```
+host ENV < runner.env_file < runner.env < job.env_file < job.env < run.env_file < run.env
 ```
 
 **Shell expansion**: Values support `~` and `$VAR` / `${VAR}` expansion.

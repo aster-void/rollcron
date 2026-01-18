@@ -112,8 +112,30 @@ struct Config {
 
 #[derive(Debug, Deserialize)]
 pub struct BuildConfigRaw {
-    pub run: String,
+    pub sh: String,
     pub timeout: Option<String>,
+    pub env_file: Option<String>,
+    pub env: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RunConfigRaw {
+    pub sh: String,
+    #[serde(default = "default_timeout")]
+    pub timeout: String,
+    #[serde(default)]
+    pub concurrency: Concurrency,
+    pub retry: Option<RetryConfigRaw>,
+    pub working_dir: Option<String>,
+    pub env_file: Option<String>,
+    pub env: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LogConfigRaw {
+    pub file: Option<String>,
+    #[serde(default = "default_log_max_size")]
+    pub max_size: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,21 +143,13 @@ pub struct JobConfig {
     pub name: Option<String>,
     pub schedule: ScheduleConfig,
     pub build: Option<BuildConfigRaw>,
-    pub run: String,
-    #[serde(default = "default_timeout")]
-    pub timeout: String,
-    #[serde(default)]
-    pub concurrency: Concurrency,
-    pub retry: Option<RetryConfigRaw>,
-    pub working_dir: Option<String>,
+    pub run: RunConfigRaw,
+    pub log: Option<LogConfigRaw>,
     pub enabled: Option<bool>,
     pub env_file: Option<String>,
     pub env: Option<HashMap<String, String>>,
     #[serde(default)]
     pub webhook: Vec<WebhookConfig>,
-    pub log_file: Option<String>,
-    #[serde(default = "default_log_max_size")]
-    pub log_max_size: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,6 +183,8 @@ fn default_log_max_size() -> String {
 pub struct BuildConfig {
     pub command: String,
     pub timeout: Duration,
+    pub env_file: Option<String>,
+    pub env: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +202,8 @@ pub struct Job {
     pub timezone: Option<TimezoneConfig>,
     pub env_file: Option<String>,
     pub env: Option<HashMap<String, String>>,
+    pub run_env_file: Option<String>,
+    pub run_env: Option<HashMap<String, String>>,
     pub webhook: Vec<WebhookConfig>,
     pub log_file: Option<String>,
     pub log_max_size: u64,
@@ -249,8 +267,8 @@ fn parse_job(
     let schedule = Cron::from_str(&job.schedule.cron)
         .map_err(|e| anyhow!("Invalid cron '{}': {}", job.schedule.cron, e))?;
 
-    let timeout = parse_duration(&job.timeout)
-        .map_err(|e| anyhow!("Invalid timeout '{}': {}", job.timeout, e))?;
+    let timeout = parse_duration(&job.run.timeout)
+        .map_err(|e| anyhow!("Invalid run.timeout '{}': {}", job.run.timeout, e))?;
 
     let build = job
         .build
@@ -261,8 +279,10 @@ fn parse_job(
                 .transpose()?
                 .unwrap_or(timeout);
             Ok::<_, anyhow::Error>(BuildConfig {
-                command: b.run,
+                command: b.sh,
                 timeout: build_timeout,
+                env_file: b.env_file,
+                env: b.env,
             })
         })
         .transpose()?;
@@ -270,6 +290,7 @@ fn parse_job(
     let name = job.name.unwrap_or_else(|| id.to_string());
 
     let retry = job
+        .run
         .retry
         .map(|r| {
             if r.max == 0 {
@@ -310,25 +331,33 @@ fn parse_job(
     let mut webhook = runner_webhook.to_vec();
     webhook.extend(job.webhook);
 
-    let log_max_size =
-        parse_size(&job.log_max_size).map_err(|e| anyhow!("Invalid log_max_size: {}", e))?;
+    let (log_file, log_max_size) = match job.log {
+        Some(log) => {
+            let max_size =
+                parse_size(&log.max_size).map_err(|e| anyhow!("Invalid log.max_size: {}", e))?;
+            (log.file, max_size)
+        }
+        None => (None, parse_size(&default_log_max_size()).unwrap()),
+    };
 
     Ok(Job {
         id: id.to_string(),
         name,
         schedule,
         build,
-        command: job.run,
+        command: job.run.sh,
         timeout,
-        concurrency: job.concurrency,
+        concurrency: job.run.concurrency,
         retry,
-        working_dir: job.working_dir,
+        working_dir: job.run.working_dir,
         enabled: job.enabled.unwrap_or(true),
         timezone: job_timezone,
         env_file: job.env_file,
         env: job.env,
+        run_env_file: job.run.env_file,
+        run_env: job.run.env,
         webhook,
-        log_file: job.log_file,
+        log_file,
         log_max_size,
     })
 }
@@ -372,7 +401,8 @@ jobs:
   hello:
     schedule:
       cron: "*/5 * * * *"
-    run: echo hello
+    run:
+      sh: echo hello
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert_eq!(jobs.len(), 1);
@@ -390,7 +420,8 @@ jobs:
   weekly:
     schedule:
       cron: "0 7 * * 0"
-    run: echo sunday
+    run:
+      sh: echo sunday
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert_eq!(jobs.len(), 1);
@@ -405,7 +436,8 @@ jobs:
     name: "Build Project"
     schedule:
       cron: "0 * * * *"
-    run: cargo build
+    run:
+      sh: cargo build
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert_eq!(jobs[0].id, "build");
@@ -419,8 +451,9 @@ jobs:
   slow:
     schedule:
       cron: "0 * * * *"
-    run: sleep 30
-    timeout: 60s
+    run:
+      sh: sleep 30
+      timeout: 60s
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert_eq!(jobs[0].timeout, Duration::from_secs(60));
@@ -433,13 +466,15 @@ jobs:
   job1:
     schedule:
       cron: "*/5 * * * *"
-    run: echo one
+    run:
+      sh: echo one
   job2:
     name: "Second Job"
     schedule:
       cron: "0 * * * *"
-    run: echo two
-    timeout: 30s
+    run:
+      sh: echo two
+      timeout: 30s
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert_eq!(jobs.len(), 2);
@@ -459,7 +494,8 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert_eq!(jobs[0].concurrency, Concurrency::Skip);
@@ -472,23 +508,27 @@ jobs:
   parallel_job:
     schedule:
       cron: "* * * * *"
-    run: echo 1
-    concurrency: parallel
+    run:
+      sh: echo 1
+      concurrency: parallel
   wait_job:
     schedule:
       cron: "* * * * *"
-    run: echo 2
-    concurrency: wait
+    run:
+      sh: echo 2
+      concurrency: wait
   skip_job:
     schedule:
       cron: "* * * * *"
-    run: echo 3
-    concurrency: skip
+    run:
+      sh: echo 3
+      concurrency: skip
   replace_job:
     schedule:
       cron: "* * * * *"
-    run: echo 4
-    concurrency: replace
+    run:
+      sh: echo 4
+      concurrency: replace
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         let find = |id: &str| jobs.iter().find(|j| j.id == id).unwrap();
@@ -506,14 +546,16 @@ jobs:
   with_retry:
     schedule:
       cron: "* * * * *"
-    run: echo test
-    retry:
-      max: 3
-      delay: 2s
+    run:
+      sh: echo test
+      retry:
+        max: 3
+        delay: 2s
   no_retry:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         let find = |id: &str| jobs.iter().find(|j| j.id == id).unwrap();
@@ -532,9 +574,10 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
-    retry:
-      max: 2
+    run:
+      sh: echo test
+      retry:
+        max: 2
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         let retry = jobs[0].retry.as_ref().unwrap();
@@ -551,7 +594,8 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
 "#;
         let (runner, _) = parse_config(yaml).unwrap();
         assert_eq!(
@@ -567,7 +611,8 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
 "#;
         let (runner, _) = parse_config(yaml).unwrap();
         assert_eq!(runner.timezone, TimezoneConfig::Utc);
@@ -582,7 +627,8 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
 "#;
         let (runner, _) = parse_config(yaml).unwrap();
         assert_eq!(runner.timezone, TimezoneConfig::Inherit);
@@ -595,8 +641,9 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
-    working_dir: ./scripts
+    run:
+      sh: echo test
+      working_dir: ./scripts
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert_eq!(jobs[0].working_dir.as_deref(), Some("./scripts"));
@@ -611,7 +658,8 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
 "#;
         assert!(parse_config(yaml).is_err());
     }
@@ -623,18 +671,20 @@ jobs:
   with_retry_jitter:
     schedule:
       cron: "* * * * *"
-    run: echo test
-    retry:
-      max: 3
-      delay: 1s
-      jitter: 500ms
+    run:
+      sh: echo test
+      retry:
+        max: 3
+        delay: 1s
+        jitter: 500ms
   retry_no_jitter:
     schedule:
       cron: "* * * * *"
-    run: echo test
-    retry:
-      max: 2
-      delay: 1s
+    run:
+      sh: echo test
+      retry:
+        max: 2
+        delay: 1s
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         let find = |id: &str| jobs.iter().find(|j| j.id == id).unwrap();
@@ -662,7 +712,8 @@ jobs:
   "../escape":
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert!(jobs.is_empty()); // Invalid job is skipped
@@ -675,7 +726,8 @@ jobs:
   "foo/bar":
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert!(jobs.is_empty()); // Invalid job is skipped
@@ -688,7 +740,8 @@ jobs:
   my-job_123:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert_eq!(jobs[0].id, "my-job_123");
@@ -701,9 +754,10 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
-    retry:
-      max: 0
+    run:
+      sh: echo test
+      retry:
+        max: 0
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert!(jobs.is_empty()); // Invalid job is skipped
@@ -716,7 +770,8 @@ jobs:
   test_disabled:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
     enabled: false
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
@@ -730,7 +785,8 @@ jobs:
   test_enabled:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
     enabled: true
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
@@ -744,7 +800,8 @@ jobs:
   test_default:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert_eq!(jobs[0].enabled, true);
@@ -760,11 +817,13 @@ jobs:
     schedule:
       cron: "* * * * *"
       timezone: America/New_York
-    run: echo test
+    run:
+      sh: echo test
   job2:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
 "#;
         let (runner, jobs) = parse_config(yaml).unwrap();
         assert_eq!(
@@ -790,7 +849,8 @@ jobs:
     schedule:
       cron: "* * * * *"
       timezone: inherit
-    run: echo test
+    run:
+      sh: echo test
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert_eq!(jobs[0].timezone, Some(TimezoneConfig::Inherit));
@@ -804,7 +864,8 @@ jobs:
     schedule:
       cron: "* * * * *"
       timezone: Invalid/Zone
-    run: echo test
+    run:
+      sh: echo test
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert!(jobs.is_empty()); // Invalid job is skipped
@@ -821,7 +882,8 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
 "#;
         let (runner, _) = parse_config(yaml).unwrap();
         let env = runner.env.as_ref().unwrap();
@@ -838,7 +900,8 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
 "#;
         let (runner, _) = parse_config(yaml).unwrap();
         assert_eq!(runner.env_file.as_deref(), Some(".env.global"));
@@ -851,7 +914,8 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
     env:
       KEY1: value1
       KEY2: value2
@@ -869,7 +933,8 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
     env_file: .env.job
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
@@ -887,7 +952,8 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
     env_file: .env.local
     env:
       LOCAL_VAR: local_value
@@ -915,7 +981,8 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         // Job inherits runner webhook
@@ -933,7 +1000,8 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
     webhook:
       - url: https://discord.com/api/webhooks/custom
 "#;
@@ -949,7 +1017,8 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert!(jobs[0].webhook.is_empty());
@@ -962,7 +1031,8 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
     webhook:
       - url: https://discord.com/api/webhooks/123456/abcdef
 "#;
@@ -982,7 +1052,8 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
     webhook:
       - url: https://hooks.slack.com/first
       - url: https://hooks.slack.com/second
@@ -1000,7 +1071,8 @@ jobs:
   test:
     schedule:
       cron: "* * * * *"
-    run: echo test
+    run:
+      sh: echo test
     webhook:
       - type: discord
         url: https://discord.com/api/webhooks/test
@@ -1048,10 +1120,11 @@ jobs:
 jobs:
   build-job:
     build:
-      run: cargo build --release
+      sh: cargo build --release
     schedule:
       cron: "0 * * * *"
-    run: ./target/release/app
+    run:
+      sh: ./target/release/app
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         let build = jobs[0].build.as_ref().unwrap();
@@ -1065,12 +1138,13 @@ jobs:
 jobs:
   build-job:
     build:
-      run: cargo build --release
+      sh: cargo build --release
       timeout: 30m
-    timeout: 10s
     schedule:
       cron: "0 * * * *"
-    run: ./target/release/app
+    run:
+      sh: ./target/release/app
+      timeout: 10s
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         let build = jobs[0].build.as_ref().unwrap();
@@ -1084,11 +1158,12 @@ jobs:
 jobs:
   build-job:
     build:
-      run: cargo build --release
-    timeout: 5m
+      sh: cargo build --release
     schedule:
       cron: "0 * * * *"
-    run: ./target/release/app
+    run:
+      sh: ./target/release/app
+      timeout: 5m
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         let build = jobs[0].build.as_ref().unwrap();
@@ -1104,9 +1179,159 @@ jobs:
   simple-job:
     schedule:
       cron: "0 * * * *"
-    run: echo hello
+    run:
+      sh: echo hello
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert!(jobs[0].build.is_none());
+    }
+
+    #[test]
+    fn parse_log_config() {
+        let yaml = r#"
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    run:
+      sh: echo test
+    log:
+      file: output.log
+      max_size: 50M
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs[0].log_file.as_deref(), Some("output.log"));
+        assert_eq!(jobs[0].log_max_size, 50 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_log_config_default_max_size() {
+        let yaml = r#"
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    run:
+      sh: echo test
+    log:
+      file: output.log
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs[0].log_file.as_deref(), Some("output.log"));
+        assert_eq!(jobs[0].log_max_size, 10 * 1024 * 1024); // default 10M
+    }
+
+    #[test]
+    fn parse_no_log_config() {
+        let yaml = r#"
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    run:
+      sh: echo test
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert!(jobs[0].log_file.is_none());
+        assert_eq!(jobs[0].log_max_size, 10 * 1024 * 1024); // default 10M
+    }
+
+    #[test]
+    fn parse_build_env() {
+        let yaml = r#"
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    build:
+      sh: cargo build
+      env_file: .env.build
+      env:
+        CARGO_INCREMENTAL: "1"
+    run:
+      sh: ./target/debug/app
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        let build = jobs[0].build.as_ref().unwrap();
+        assert_eq!(build.env_file.as_deref(), Some(".env.build"));
+        let env = build.env.as_ref().unwrap();
+        assert_eq!(env.get("CARGO_INCREMENTAL"), Some(&"1".to_string()));
+    }
+
+    #[test]
+    fn parse_run_env() {
+        let yaml = r#"
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    run:
+      sh: ./app
+      env_file: .env.run
+      env:
+        NODE_ENV: production
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs[0].run_env_file.as_deref(), Some(".env.run"));
+        let env = jobs[0].run_env.as_ref().unwrap();
+        assert_eq!(env.get("NODE_ENV"), Some(&"production".to_string()));
+    }
+
+    #[test]
+    fn parse_full_env_hierarchy() {
+        let yaml = r#"
+runner:
+  env_file: .env.global
+  env:
+    GLOBAL_VAR: global
+
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    build:
+      sh: cargo build
+      env_file: .env.build
+      env:
+        BUILD_VAR: build
+    run:
+      sh: ./app
+      env_file: .env.run
+      env:
+        RUN_VAR: run
+    env_file: .env.job
+    env:
+      JOB_VAR: job
+"#;
+        let (runner, jobs) = parse_config(yaml).unwrap();
+
+        // Runner env
+        assert_eq!(runner.env_file.as_deref(), Some(".env.global"));
+        assert_eq!(
+            runner.env.as_ref().unwrap().get("GLOBAL_VAR"),
+            Some(&"global".to_string())
+        );
+
+        // Job-level env
+        assert_eq!(jobs[0].env_file.as_deref(), Some(".env.job"));
+        assert_eq!(
+            jobs[0].env.as_ref().unwrap().get("JOB_VAR"),
+            Some(&"job".to_string())
+        );
+
+        // Build-specific env
+        let build = jobs[0].build.as_ref().unwrap();
+        assert_eq!(build.env_file.as_deref(), Some(".env.build"));
+        assert_eq!(
+            build.env.as_ref().unwrap().get("BUILD_VAR"),
+            Some(&"build".to_string())
+        );
+
+        // Run-specific env
+        assert_eq!(jobs[0].run_env_file.as_deref(), Some(".env.run"));
+        assert_eq!(
+            jobs[0].run_env.as_ref().unwrap().get("RUN_VAR"),
+            Some(&"run".to_string())
+        );
     }
 }

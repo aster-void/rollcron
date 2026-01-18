@@ -261,6 +261,23 @@ fn merge_env_vars_for_build(
         }
     }
 
+    // 5. Merge build.env_file (loaded from build_dir)
+    if let Some(build) = &job.build {
+        if let Some(env_file_path) = &build.env_file {
+            let expanded = env::expand_string(env_file_path);
+            let full_path = build_dir.join(&expanded);
+            let vars = env::load_env_from_path(&full_path)?;
+            env_vars.extend(vars);
+        }
+
+        // 6. Merge build.env (with shell expansion on values)
+        if let Some(build_env) = &build.env {
+            for (k, v) in build_env {
+                env_vars.insert(k.clone(), env::expand_string(v));
+            }
+        }
+    }
+
     Ok(env_vars)
 }
 
@@ -571,6 +588,21 @@ fn merge_env_vars(
         }
     }
 
+    // 5. Merge run.env_file (loaded from work_dir)
+    if let Some(env_file_path) = &job.run_env_file {
+        let expanded = env::expand_string(env_file_path);
+        let full_path = work_dir.join(&expanded);
+        let vars = env::load_env_from_path(&full_path)?;
+        env_vars.extend(vars);
+    }
+
+    // 6. Merge run.env (with shell expansion on values)
+    if let Some(run_env) = &job.run_env {
+        for (k, v) in run_env {
+            env_vars.insert(k.clone(), env::expand_string(v));
+        }
+    }
+
     Ok(env_vars)
 }
 
@@ -703,6 +735,8 @@ mod tests {
             timezone: None,
             env_file: None,
             env: None,
+            run_env_file: None,
+            run_env: None,
             webhook: vec![],
             log_file: None,
             log_max_size: 10 * 1024 * 1024,

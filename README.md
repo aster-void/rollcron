@@ -28,14 +28,16 @@ jobs:
   hello:
     schedule:
       cron: "*/5 * * * *"
-    run: echo "Hello from rollcron!"
+    run:
+      sh: echo "Hello from rollcron!"
 
   backup:
     name: "Daily Backup"
     schedule:
       cron: "0 2 * * *"
-    run: ./scripts/backup.sh
-    timeout: 5m
+    run:
+      sh: ./scripts/backup.sh
+      timeout: 5m
 ```
 
 2. Run rollcron:
@@ -77,13 +79,20 @@ jobs:
     schedule:
       cron: "* * * * *"       # Cron expression (5 fields)
     build:                    # Optional: build configuration
-      run: make               # Build command (runs in build/ dir, preserves cache)
-      timeout: 30m            # Optional: timeout for build (defaults to job timeout)
-    run: ./app                # Shell command (runs in run/ dir)
-    timeout: 10s              # Optional (default: 1h)
-    jitter: 30s               # Optional: random delay 0-30s before execution
-    concurrency: skip         # Optional: parallel|wait|skip|replace (default: skip)
-    working_dir: ./subdir     # Optional: working directory (relative to job snapshot dir)
+      sh: make                # Build command (runs in build/ dir, preserves cache)
+      timeout: 30m            # Optional: timeout for build (defaults to run.timeout)
+    run:                      # Run configuration
+      sh: ./app               # Shell command (runs in run/ dir)
+      timeout: 10s            # Optional (default: 1h)
+      concurrency: skip       # Optional: parallel|wait|skip|replace (default: skip)
+      working_dir: ./subdir   # Optional: working directory (relative to run dir)
+      retry:                  # Optional
+        max: 3                # Max retry attempts
+        delay: 1s             # Initial delay (default: 1s), exponential backoff
+        jitter: 500ms         # Optional: random variation (default: 25% of delay)
+    log:                      # Optional: logging configuration
+      file: output.log        # File for stdout/stderr (relative to job dir)
+      max_size: 10M           # Rotate when exceeded (default: 10M)
     env_file: .env.local      # Optional: .env file (relative to job snapshot dir)
     env:                      # Optional: inline environment variables
       KEY: value
@@ -91,12 +100,6 @@ jobs:
       - url: https://...      # URL format
       - id: "..."             # Discord format
         token: "..."
-    retry:                    # Optional
-      max: 3                  # Max retry attempts
-      delay: 1s               # Initial delay (default: 1s), exponential backoff
-      jitter: 500ms           # Optional: random variation (default: 25% of delay)
-    log_file: output.log      # Optional: file for stdout/stderr (relative to job dir)
-    log_max_size: 10M         # Optional: rotate when exceeded (default: 10M)
 ```
 
 ### Runner
@@ -151,31 +154,50 @@ Payload format (JSON POST):
 
 Jobs can access environment variables from multiple sources. Variables are merged with the following priority (highest wins):
 
-1. `job.env` - Inline variables in job config
-2. `job.env_file` - Job-specific .env file (relative to job snapshot dir)
-3. `runner.env` - Inline variables in runner config
-4. `runner.env_file` - Global .env file (relative to repo root)
-5. Host environment - Inherited from the system
+**For build commands:**
+1. `build.env` - Build-specific inline variables
+2. `build.env_file` - Build-specific .env file
+3. `job.env` - Job-level inline variables
+4. `job.env_file` - Job-level .env file
+5. `runner.env` - Global inline variables
+6. `runner.env_file` - Global .env file
+7. Host environment - Inherited from the system
 
-**Shell Expansion**: Paths (`env_file`, `working_dir`) and env values support `~` (home directory) and `$VAR` / `${VAR}` (environment variables).
+**For run commands:**
+1. `run.env` - Run-specific inline variables
+2. `run.env_file` - Run-specific .env file
+3. `job.env` - Job-level inline variables
+4. `job.env_file` - Job-level .env file
+5. `runner.env` - Global inline variables
+6. `runner.env_file` - Global .env file
+7. Host environment - Inherited from the system
+
+**Shell Expansion**: Paths (`env_file`, `run.working_dir`) and env values support `~` (home directory) and `$VAR` / `${VAR}` (environment variables).
 
 Example:
 
 ```yaml
 runner:
-  env_file: .env                # Load from repo root
+  env_file: .env                # Global env file
   env:
     API_URL: https://api.example.com
-    DEBUG: "true"
 
 jobs:
   my-job:
     schedule:
       cron: "*/5 * * * *"
-    run: echo $API_URL $JOB_SECRET
-    env_file: .env.local        # Load from job snapshot dir
+    build:
+      sh: cargo build
+      env:
+        CARGO_INCREMENTAL: "1"  # Build-only variable
+    run:
+      sh: ./target/debug/app
+      env_file: .env.run        # Run-specific env file
+      env:
+        NODE_ENV: production    # Run-only variable
+    env_file: .env.job          # Shared by build and run
     env:
-      DEBUG: "false"            # Overrides runner.env
+      DEBUG: "false"            # Shared by build and run
 ```
 
 ### Concurrency
@@ -201,10 +223,12 @@ Random delay to prevent thundering herd problems:
 Jobs can automatically retry on failure with exponential backoff:
 
 ```yaml
-retry:
-  max: 3        # Retry up to 3 times
-  delay: 2s     # Initial delay (doubles each retry: 2s, 4s, 8s)
-  jitter: 500ms # Optional: random variation (default: 25% of delay)
+run:
+  sh: ./my-script.sh
+  retry:
+    max: 3        # Retry up to 3 times
+    delay: 2s     # Initial delay (doubles each retry: 2s, 4s, 8s)
+    jitter: 500ms # Optional: random variation (default: 25% of delay)
 ```
 
 ### Build Step
@@ -215,10 +239,11 @@ Jobs can optionally include a build step that runs before execution. Build artif
 jobs:
   my-app:
     build:
-      run: cargo build --release    # Runs in build/ directory
-      timeout: 30m                  # Optional (defaults to job timeout)
-    run: ./target/release/app       # Runs in run/ directory
-    timeout: 10s
+      sh: cargo build --release     # Runs in build/ directory
+      timeout: 30m                  # Optional (defaults to run.timeout)
+    run:
+      sh: ./target/release/app      # Runs in run/ directory
+      timeout: 10s
     schedule:
       cron: "0 * * * *"
 ```
@@ -241,14 +266,16 @@ Capture job output to a file:
 ```yaml
 jobs:
   backup:
-    run: ./backup.sh
-    log_file: backup.log    # Written to <job_dir>/backup.log
-    log_max_size: 50M       # Rotate when file exceeds 50MB (default: 10M)
+    run:
+      sh: ./backup.sh
+    log:
+      file: backup.log      # Written to <job_dir>/backup.log
+      max_size: 50M         # Rotate when file exceeds 50MB (default: 10M)
 ```
 
-When `log_file` is set, stdout/stderr is appended to the file. Without it, output is discarded.
+When `log.file` is set, stdout/stderr is appended to the file. Without it, output is discarded.
 
-**Rotation**: When the log exceeds `log_max_size`, it's renamed to `backup.log.old` (previous `.old` is deleted).
+**Rotation**: When the log exceeds `log.max_size`, it's renamed to `backup.log.old` (previous `.old` is deleted).
 
 **Size format**: `10M` (megabytes), `1G` (gigabytes), `512K` (kilobytes), or plain bytes.
 
@@ -330,39 +357,43 @@ jobs:
     schedule:
       cron: "0 * * * *"
     build:
-      run: cargo build --release    # Cached between syncs
+      sh: cargo build --release     # Cached between syncs
       timeout: 30m
-    run: ./target/release/my-app
-    timeout: 5m
+    run:
+      sh: ./target/release/my-app
+      timeout: 5m
 
   test:
     name: "Run Tests"
     schedule:
       cron: "0 */6 * * *"
     build:
-      run: npm ci                   # Install dependencies
-    run: npm test
-    working_dir: ./frontend
+      sh: npm ci                    # Install dependencies
+    run:
+      sh: npm test
+      working_dir: ./frontend
+      retry:
+        max: 2
+        delay: 30s
     env:
       NODE_ENV: test
-    retry:
-      max: 2
-      delay: 30s
 
   deploy:
     name: "Deploy to Production"
     schedule:
       cron: "0 0 * * *"
-    run: ./deploy.sh
-    timeout: 10m
-    concurrency: skip      # Don't deploy if previous deploy is running
+    run:
+      sh: ./deploy.sh
+      timeout: 10m
+      concurrency: skip             # Don't deploy if previous deploy is running
     env_file: .env.deploy
 
   cleanup:
     schedule:
       cron: "0 3 * * 0"
-    run: find /tmp -mtime +7 -delete
-    concurrency: replace   # Kill old cleanup, start fresh
+    run:
+      sh: find /tmp -mtime +7 -delete
+      concurrency: replace          # Kill old cleanup, start fresh
 ```
 
 ## License
