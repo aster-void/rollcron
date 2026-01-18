@@ -888,4 +888,33 @@ mod tests {
         let jitter = generate_jitter(Duration::ZERO);
         assert_eq!(jitter, Duration::ZERO);
     }
+
+    #[test]
+    fn format_duration_milliseconds() {
+        assert_eq!(format_duration(Duration::from_millis(0)), "0ms");
+        assert_eq!(format_duration(Duration::from_millis(1)), "1ms");
+        assert_eq!(format_duration(Duration::from_millis(500)), "500ms");
+        assert_eq!(format_duration(Duration::from_millis(999)), "999ms");
+    }
+
+    #[test]
+    fn format_duration_seconds() {
+        assert_eq!(format_duration(Duration::from_secs(1)), "1.000s");
+        assert_eq!(format_duration(Duration::from_millis(1500)), "1.500s");
+        assert_eq!(format_duration(Duration::from_millis(59999)), "59.999s");
+    }
+
+    #[test]
+    fn format_duration_minutes() {
+        assert_eq!(format_duration(Duration::from_secs(60)), "1m 0s");
+        assert_eq!(format_duration(Duration::from_secs(90)), "1m 30s");
+        assert_eq!(format_duration(Duration::from_secs(3599)), "59m 59s");
+    }
+
+    #[test]
+    fn format_duration_hours() {
+        assert_eq!(format_duration(Duration::from_secs(3600)), "1h 0m 0s");
+        assert_eq!(format_duration(Duration::from_secs(3661)), "1h 1m 1s");
+        assert_eq!(format_duration(Duration::from_secs(7325)), "2h 2m 5s");
+    }
 }
