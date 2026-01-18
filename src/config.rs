@@ -151,7 +151,7 @@ pub struct ScheduleConfig {
 }
 
 fn default_timeout() -> String {
-    "10s".to_string()
+    "1h".to_string()
 }
 
 fn default_log_max_size() -> String {
@@ -349,7 +349,7 @@ jobs:
         assert_eq!(jobs[0].id, "hello");
         assert_eq!(jobs[0].name, "hello");
         assert_eq!(jobs[0].command, "echo hello");
-        assert_eq!(jobs[0].timeout, Duration::from_secs(10));
+        assert_eq!(jobs[0].timeout, Duration::from_secs(3600));
     }
 
     #[test]

@@ -16,6 +16,9 @@ use crate::webhook::{self, JobFailure};
 /// Default jitter ratio when not explicitly configured (25% of base delay)
 const AUTO_JITTER_RATIO: u32 = 25;
 
+/// Grace period to wait after SIGTERM before sending SIGKILL
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub async fn execute_job(job: &Job, sot_path: &Path, runner: &RunnerConfig) -> bool {
     let job_dir = git::get_job_dir(sot_path, &job.id);
     let work_dir = resolve_work_dir(sot_path, &job.id, &job.working_dir);
@@ -155,25 +158,103 @@ async fn run_command(
     cmd.args(["-c", &job.command])
         .current_dir(work_dir)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
+        .stderr(std::process::Stdio::piped());
 
     for (key, value) in env_vars {
         cmd.env(key, value);
     }
 
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return CommandResult::ExecError(e.to_string()),
     };
 
-    let result = tokio::time::timeout(job.timeout, child.wait_with_output()).await;
+    // Take stdout/stderr handles before waiting
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
 
-    match result {
-        Ok(Ok(output)) => CommandResult::Completed(output),
+    // Spawn tasks to read output concurrently (prevents buffer deadlock)
+    let stdout_task = tokio::spawn(async move {
+        match stdout {
+            Some(mut out) => {
+                let mut buf = Vec::new();
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut out, &mut buf).await;
+                buf
+            }
+            None => Vec::new(),
+        }
+    });
+    let stderr_task = tokio::spawn(async move {
+        match stderr {
+            Some(mut err) => {
+                let mut buf = Vec::new();
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut err, &mut buf).await;
+                buf
+            }
+            None => Vec::new(),
+        }
+    });
+
+    // Wait for process with timeout
+    let wait_result = tokio::time::timeout(job.timeout, child.wait()).await;
+
+    match wait_result {
+        Ok(Ok(status)) => {
+            let stdout = stdout_task.await.unwrap_or_default();
+            let stderr = stderr_task.await.unwrap_or_default();
+            CommandResult::Completed(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            })
+        }
         Ok(Err(e)) => CommandResult::ExecError(e.to_string()),
-        Err(_) => CommandResult::Timeout,
+        Err(_) => {
+            // Timeout occurred - attempt graceful shutdown
+            graceful_kill(&mut child, &job.id).await;
+            CommandResult::Timeout
+        }
     }
+}
+
+/// Attempts graceful shutdown: SIGTERM first, then SIGKILL after grace period.
+#[cfg(unix)]
+async fn graceful_kill(child: &mut tokio::process::Child, job_id: &str) {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+
+    let Some(pid) = child.id() else {
+        return; // Process already exited
+    };
+    let pid = Pid::from_raw(pid as i32);
+
+    // Send SIGTERM for graceful shutdown
+    if kill(pid, Signal::SIGTERM).is_ok() {
+        debug!(target: "rollcron::job", job_id = %job_id, "Sent SIGTERM, waiting for graceful exit");
+
+        // Wait for process to exit gracefully
+        if tokio::time::timeout(GRACEFUL_SHUTDOWN_TIMEOUT, child.wait())
+            .await
+            .is_ok()
+        {
+            debug!(target: "rollcron::job", job_id = %job_id, "Process exited gracefully after SIGTERM");
+            return;
+        }
+
+        // Grace period expired - force kill
+        warn!(target: "rollcron::job", job_id = %job_id, "Grace period expired, sending SIGKILL");
+    }
+
+    // Send SIGKILL
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
+#[cfg(not(unix))]
+async fn graceful_kill(child: &mut tokio::process::Child, _job_id: &str) {
+    // On non-Unix platforms, just kill immediately
+    let _ = child.kill().await;
+    let _ = child.wait().await;
 }
 
 /// Load runner-level env vars for webhook URL expansion.
