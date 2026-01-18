@@ -76,8 +76,9 @@ jobs:
     name: "Display Name"      # Optional: display name (defaults to job ID)
     schedule:
       cron: "* * * * *"       # Cron expression (5 fields)
-    build: make               # Optional: build command (runs in build/ dir, preserves cache)
-    build_timeout: 30m        # Optional: timeout for build (defaults to timeout)
+    build:                    # Optional: build configuration
+      run: make               # Build command (runs in build/ dir, preserves cache)
+      timeout: 30m            # Optional: timeout for build (defaults to job timeout)
     run: ./app                # Shell command (runs in run/ dir)
     timeout: 10s              # Optional (default: 1h)
     jitter: 30s               # Optional: random delay 0-30s before execution
@@ -213,8 +214,9 @@ Jobs can optionally include a build step that runs before execution. Build artif
 ```yaml
 jobs:
   my-app:
-    build: cargo build --release    # Runs in build/ directory
-    build_timeout: 30m              # Optional (defaults to timeout)
+    build:
+      run: cargo build --release    # Runs in build/ directory
+      timeout: 30m                  # Optional (defaults to job timeout)
     run: ./target/release/app       # Runs in run/ directory
     timeout: 10s
     schedule:
@@ -327,8 +329,9 @@ jobs:
     name: "Build & Run App"
     schedule:
       cron: "0 * * * *"
-    build: cargo build --release    # Cached between syncs
-    build_timeout: 30m
+    build:
+      run: cargo build --release    # Cached between syncs
+      timeout: 30m
     run: ./target/release/my-app
     timeout: 5m
 
@@ -336,7 +339,8 @@ jobs:
     name: "Run Tests"
     schedule:
       cron: "0 */6 * * *"
-    build: npm ci                   # Install dependencies
+    build:
+      run: npm ci                   # Install dependencies
     run: npm test
     working_dir: ./frontend
     env:

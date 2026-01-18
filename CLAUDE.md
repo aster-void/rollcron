@@ -29,12 +29,16 @@ src/
 
 ```rust
 // config.rs
+struct BuildConfig {
+    command: String,      // Build command (runs in build/ dir)
+    timeout: Duration,    // Timeout for build (defaults to job timeout)
+}
+
 struct Job {
     id: String,           // Key from YAML (used for directories)
     name: String,         // Display name (defaults to id)
     schedule: croner::Cron,
-    build: Option<String>,     // Optional build command (runs in build/ dir)
-    build_timeout: Duration,   // Timeout for build (defaults to timeout)
+    build: Option<BuildConfig>,  // Optional build configuration
     command: String,
     timeout: Duration,
     concurrency: Concurrency,
@@ -88,8 +92,9 @@ jobs:
     name: "Display Name"     # Optional (defaults to job-id)
     schedule:
       cron: "*/5 * * * *"
-    build: cargo build       # Optional: build command (runs in build/ directory)
-    build_timeout: 30m       # Optional: timeout for build (defaults to timeout)
+    build:                   # Optional: build configuration
+      run: cargo build       # Build command (runs in build/ directory)
+      timeout: 30m           # Optional: timeout for build (defaults to job timeout)
     run: ./target/debug/app  # Run command (runs in run/ directory)
     timeout: 10s             # Optional (default: 1h)
     concurrency: skip        # Optional: parallel|wait|skip|replace (default: skip)
@@ -146,7 +151,7 @@ jobs:
 
 ### Build Flow (per job)
 1. Sync build/ directory via git worktree
-2. Run build command (if configured) with build_timeout
+2. Run build command (if configured) with build.timeout
 3. On success: copy build/ to run/ (atomic, excludes .git)
 4. On failure: send webhook notification, keep old run/
 

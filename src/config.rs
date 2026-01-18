@@ -111,11 +111,16 @@ struct Config {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct BuildConfigRaw {
+    pub run: String,
+    pub timeout: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct JobConfig {
     pub name: Option<String>,
     pub schedule: ScheduleConfig,
-    pub build: Option<String>,
-    pub build_timeout: Option<String>,
+    pub build: Option<BuildConfigRaw>,
     pub run: String,
     #[serde(default = "default_timeout")]
     pub timeout: String,
@@ -161,12 +166,17 @@ fn default_log_max_size() -> String {
 }
 
 #[derive(Debug, Clone)]
+pub struct BuildConfig {
+    pub command: String,
+    pub timeout: Duration,
+}
+
+#[derive(Debug, Clone)]
 pub struct Job {
     pub id: String,
     pub name: String,
     pub schedule: Cron,
-    pub build: Option<String>,
-    pub build_timeout: Duration,
+    pub build: Option<BuildConfig>,
     pub command: String,
     pub timeout: Duration,
     pub concurrency: Concurrency,
@@ -242,11 +252,20 @@ fn parse_job(
     let timeout = parse_duration(&job.timeout)
         .map_err(|e| anyhow!("Invalid timeout '{}': {}", job.timeout, e))?;
 
-    let build_timeout = job
-        .build_timeout
-        .map(|bt| parse_duration(&bt).map_err(|e| anyhow!("Invalid build_timeout '{}': {}", bt, e)))
-        .transpose()?
-        .unwrap_or(timeout);
+    let build = job
+        .build
+        .map(|b| {
+            let build_timeout = b
+                .timeout
+                .map(|t| parse_duration(&t).map_err(|e| anyhow!("Invalid build.timeout '{}': {}", t, e)))
+                .transpose()?
+                .unwrap_or(timeout);
+            Ok::<_, anyhow::Error>(BuildConfig {
+                command: b.run,
+                timeout: build_timeout,
+            })
+        })
+        .transpose()?;
 
     let name = job.name.unwrap_or_else(|| id.to_string());
 
@@ -298,8 +317,7 @@ fn parse_job(
         id: id.to_string(),
         name,
         schedule,
-        build: job.build,
-        build_timeout,
+        build,
         command: job.run,
         timeout,
         concurrency: job.concurrency,
@@ -1029,13 +1047,15 @@ jobs:
         let yaml = r#"
 jobs:
   build-job:
-    build: cargo build --release
+    build:
+      run: cargo build --release
     schedule:
       cron: "0 * * * *"
     run: ./target/release/app
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
-        assert_eq!(jobs[0].build, Some("cargo build --release".to_string()));
+        let build = jobs[0].build.as_ref().unwrap();
+        assert_eq!(build.command, "cargo build --release");
         assert_eq!(jobs[0].command, "./target/release/app");
     }
 
@@ -1044,15 +1064,17 @@ jobs:
         let yaml = r#"
 jobs:
   build-job:
-    build: cargo build --release
-    build_timeout: 30m
+    build:
+      run: cargo build --release
+      timeout: 30m
     timeout: 10s
     schedule:
       cron: "0 * * * *"
     run: ./target/release/app
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
-        assert_eq!(jobs[0].build_timeout, Duration::from_secs(30 * 60));
+        let build = jobs[0].build.as_ref().unwrap();
+        assert_eq!(build.timeout, Duration::from_secs(30 * 60));
         assert_eq!(jobs[0].timeout, Duration::from_secs(10));
     }
 
@@ -1061,15 +1083,17 @@ jobs:
         let yaml = r#"
 jobs:
   build-job:
-    build: cargo build --release
+    build:
+      run: cargo build --release
     timeout: 5m
     schedule:
       cron: "0 * * * *"
     run: ./target/release/app
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
-        // build_timeout should default to timeout when not specified
-        assert_eq!(jobs[0].build_timeout, Duration::from_secs(5 * 60));
+        let build = jobs[0].build.as_ref().unwrap();
+        // build.timeout should default to job timeout when not specified
+        assert_eq!(build.timeout, Duration::from_secs(5 * 60));
         assert_eq!(jobs[0].timeout, Duration::from_secs(5 * 60));
     }
 

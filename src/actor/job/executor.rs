@@ -35,8 +35,8 @@ pub enum BuildResult {
 /// Executes the build command for a job.
 /// Returns BuildResult::NoBuild if no build command is configured.
 pub async fn execute_build(job: &Job, sot_path: &Path, runner: &RunnerConfig) -> BuildResult {
-    let build_command = match &job.build {
-        Some(cmd) => cmd,
+    let build_config = match &job.build {
+        Some(config) => config,
         None => return BuildResult::NoBuild,
     };
 
@@ -45,11 +45,11 @@ pub async fn execute_build(job: &Job, sot_path: &Path, runner: &RunnerConfig) ->
     info!(
         target: "rollcron::job",
         job_id = %job.id,
-        command = %build_command,
+        command = %build_config.command,
         "Starting build"
     );
 
-    let result = run_build_command(job, build_command, &build_dir, sot_path, runner).await;
+    let result = run_build_command(job, build_config, &build_dir, sot_path, runner).await;
 
     match &result {
         BuildCommandResult::Completed(output) if output.status.success() => {
@@ -116,13 +116,13 @@ pub async fn execute_build(job: &Job, sot_path: &Path, runner: &RunnerConfig) ->
             }
         }
         BuildCommandResult::Timeout => {
-            error!(target: "rollcron::job", job_id = %job.id, timeout = ?job.build_timeout, "Build timeout");
+            error!(target: "rollcron::job", job_id = %job.id, timeout = ?build_config.timeout, "Build timeout");
 
             if !job.webhook.is_empty() {
                 let failure = BuildFailure {
                     job_id: &job.id,
                     job_name: &job.name,
-                    error: format!("timeout after {:?}", job.build_timeout),
+                    error: format!("timeout after {:?}", build_config.timeout),
                     stderr: String::new(),
                 };
 
@@ -137,7 +137,7 @@ pub async fn execute_build(job: &Job, sot_path: &Path, runner: &RunnerConfig) ->
             }
 
             BuildResult::Failed {
-                error: format!("timeout after {:?}", job.build_timeout),
+                error: format!("timeout after {:?}", build_config.timeout),
                 stderr: String::new(),
             }
         }
@@ -146,7 +146,7 @@ pub async fn execute_build(job: &Job, sot_path: &Path, runner: &RunnerConfig) ->
 
 async fn run_build_command(
     job: &Job,
-    command: &str,
+    build_config: &crate::config::BuildConfig,
     build_dir: &Path,
     sot_path: &Path,
     runner: &RunnerConfig,
@@ -159,7 +159,7 @@ async fn run_build_command(
     };
 
     let mut cmd = Command::new("sh");
-    cmd.args(["-c", command])
+    cmd.args(["-c", &build_config.command])
         .current_dir(build_dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -197,7 +197,7 @@ async fn run_build_command(
         }
     });
 
-    let wait_result = tokio::time::timeout(job.build_timeout, child.wait()).await;
+    let wait_result = tokio::time::timeout(build_config.timeout, child.wait()).await;
 
     match wait_result {
         Ok(Ok(status)) => {
@@ -694,7 +694,6 @@ mod tests {
             name: "Test Job".to_string(),
             schedule: Cron::from_str("* * * * *").unwrap(),
             build: None,
-            build_timeout: Duration::from_secs(timeout_secs),
             command: cmd.to_string(),
             timeout: Duration::from_secs(timeout_secs),
             concurrency: Concurrency::Skip,
