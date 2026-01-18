@@ -116,6 +116,7 @@ pub struct BuildConfigRaw {
     pub timeout: Option<String>,
     pub env_file: Option<String>,
     pub env: Option<HashMap<String, String>>,
+    pub working_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,6 +149,7 @@ pub struct JobConfig {
     pub enabled: Option<bool>,
     pub env_file: Option<String>,
     pub env: Option<HashMap<String, String>>,
+    pub working_dir: Option<String>,
     #[serde(default)]
     pub webhook: Vec<WebhookConfig>,
 }
@@ -185,6 +187,7 @@ pub struct BuildConfig {
     pub timeout: Duration,
     pub env_file: Option<String>,
     pub env: Option<HashMap<String, String>>,
+    pub working_dir: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +286,7 @@ fn parse_job(
                 timeout: build_timeout,
                 env_file: b.env_file,
                 env: b.env,
+                working_dir: b.working_dir.or_else(|| job.working_dir.clone()),
             })
         })
         .transpose()?;
@@ -349,7 +353,7 @@ fn parse_job(
         timeout,
         concurrency: job.run.concurrency,
         retry,
-        working_dir: job.run.working_dir,
+        working_dir: job.run.working_dir.or(job.working_dir),
         enabled: job.enabled.unwrap_or(true),
         timezone: job_timezone,
         env_file: job.env_file,
@@ -647,6 +651,74 @@ jobs:
 "#;
         let (_, jobs) = parse_config(yaml).unwrap();
         assert_eq!(jobs[0].working_dir.as_deref(), Some("./scripts"));
+    }
+
+    #[test]
+    fn parse_job_level_working_dir() {
+        let yaml = r#"
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    run:
+      sh: echo test
+    working_dir: ./job-dir
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs[0].working_dir.as_deref(), Some("./job-dir"));
+    }
+
+    #[test]
+    fn parse_working_dir_run_overrides_job() {
+        let yaml = r#"
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    run:
+      sh: echo test
+      working_dir: ./run-dir
+    working_dir: ./job-dir
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs[0].working_dir.as_deref(), Some("./run-dir"));
+    }
+
+    #[test]
+    fn parse_working_dir_build_inherits_job() {
+        let yaml = r#"
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    build:
+      sh: cargo build
+    run:
+      sh: ./app
+    working_dir: ./job-dir
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        let build = jobs[0].build.as_ref().unwrap();
+        assert_eq!(build.working_dir.as_deref(), Some("./job-dir"));
+    }
+
+    #[test]
+    fn parse_working_dir_build_overrides_job() {
+        let yaml = r#"
+jobs:
+  test:
+    schedule:
+      cron: "* * * * *"
+    build:
+      sh: cargo build
+      working_dir: ./build-dir
+    run:
+      sh: ./app
+    working_dir: ./job-dir
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        let build = jobs[0].build.as_ref().unwrap();
+        assert_eq!(build.working_dir.as_deref(), Some("./build-dir"));
     }
 
     #[test]

@@ -119,13 +119,14 @@ jobs:
     build:
       sh: cargo build --release
       timeout: 30m
+      working_dir: ./src
       env:
         CARGO_INCREMENTAL: "1"
     run:
       sh: ./target/release/my-app
       timeout: 5m
       concurrency: skip
-      working_dir: ./app
+      working_dir: ./dist
       retry:
         max: 3
         delay: 5s
@@ -136,6 +137,7 @@ jobs:
     log:
       file: output.log
       max_size: 50M
+    working_dir: ./app
     env_file: .env.job
     env:
       DEBUG: "false"
@@ -176,6 +178,7 @@ Options:
 | `schedule.cron` | string | **required** | Cron expression (5 fields: min hour day month weekday) |
 | `schedule.timezone` | string, optional | runner's | Job-specific timezone override |
 | `enabled` | bool, optional | `true` | Enable/disable job |
+| `working_dir` | string, optional | - | Working directory for build and run (can be overridden) |
 | `env_file` | string, optional | - | Shared .env file for build and run |
 | `env` | map, optional | - | Shared environment variables for build and run |
 | `webhook` | list, optional | - | Job-specific webhooks (extends runner webhooks) |
@@ -186,6 +189,7 @@ Options:
 |-------|------|---------|-------------|
 | `sh` | string | **required** | Build command (runs in `build/` directory) |
 | `timeout` | duration, optional | run.timeout | Build timeout |
+| `working_dir` | string, optional | job's | Working directory (relative to build dir) |
 | `env_file` | string, optional | - | Build-specific .env file |
 | `env` | map, optional | - | Build-specific environment variables |
 
@@ -196,7 +200,7 @@ Options:
 | `sh` | string | **required** | Run command (runs in `run/` directory) |
 | `timeout` | duration, optional | `1h` | Execution timeout |
 | `concurrency` | string, optional | `skip` | `parallel`, `wait`, `skip`, or `replace` |
-| `working_dir` | string, optional | - | Working directory (relative to run dir) |
+| `working_dir` | string, optional | job's | Working directory (relative to run dir) |
 | `env_file` | string, optional | - | Run-specific .env file |
 | `env` | map, optional | - | Run-specific environment variables |
 

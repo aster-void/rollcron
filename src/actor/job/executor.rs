@@ -158,9 +158,11 @@ async fn run_build_command(
         }
     };
 
+    let work_dir = resolve_work_dir(build_dir, &job.id, &build_config.working_dir);
+
     let mut cmd = Command::new("sh");
     cmd.args(["-c", &build_config.command])
-        .current_dir(build_dir)
+        .current_dir(&work_dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
@@ -381,12 +383,12 @@ pub async fn execute_job(job: &Job, sot_path: &Path, runner: &RunnerConfig) -> b
     false
 }
 
-fn resolve_work_dir(run_dir: &Path, job_id: &str, working_dir: &Option<String>) -> PathBuf {
+fn resolve_work_dir(base_dir: &Path, job_id: &str, working_dir: &Option<String>) -> PathBuf {
     match working_dir {
         Some(dir) => {
             let expanded = env::expand_string(dir);
-            let work_path = run_dir.join(&expanded);
-            match (work_path.canonicalize(), run_dir.canonicalize()) {
+            let work_path = base_dir.join(&expanded);
+            match (work_path.canonicalize(), base_dir.canonicalize()) {
                 (Ok(resolved), Ok(base)) if resolved.starts_with(&base) => resolved,
                 _ => {
                     warn!(
@@ -395,11 +397,11 @@ fn resolve_work_dir(run_dir: &Path, job_id: &str, working_dir: &Option<String>) 
                         working_dir = %dir,
                         "Invalid working_dir: path traversal or non-existent"
                     );
-                    run_dir.to_path_buf()
+                    base_dir.to_path_buf()
                 }
             }
         }
-        None => run_dir.to_path_buf(),
+        None => base_dir.to_path_buf(),
     }
 }
 
