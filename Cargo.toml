@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 croner = "3"
+english-to-cron = "0.1"
 chrono = "0.4"
 chrono-tz = "0.10"
 anyhow = "1"

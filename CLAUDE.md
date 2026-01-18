@@ -32,8 +32,8 @@ src/
 // All support shorthand (string) or full (object) form via #[serde(untagged)]
 
 enum ScheduleConfigRaw {
-    Simple(String),        // "*/5 * * * *"
-    Full { cron: String, timezone: Option<String> },
+    Simple(String),        // "*/5 * * * *" or "7pm every Thursday"
+    Full { cron: String, timezone: Option<String> },  // cron also accepts English
 }
 
 enum BuildConfigRaw {
@@ -150,6 +150,31 @@ jobs:
     log: output.log           # Shorthand for { file: "..." }
 ```
 
+### English schedule (alternative to cron)
+
+```yaml
+jobs:
+  weekly:
+    schedule: "7pm every Thursday"    # Human-readable schedule
+    run: ./weekly-report.sh
+
+  daily:
+    schedule: "every day at 4:00 pm"  # Also supported
+    run: ./backup.sh
+
+  frequent:
+    schedule: "every 5 minutes"       # Interval-based
+    run: ./health-check.sh
+```
+
+Supported patterns (via [english-to-cron](https://github.com/kaplanelad/english-to-cron)):
+- `"every minute"`, `"every 5 minutes"`
+- `"every day at 4:00 pm"`, `"at 10:00 am"`
+- `"7pm every Thursday"`, `"Sunday at 12:00"`
+- `"midnight on Tuesdays"`, `"midnight on the 1st and 15th"`
+
+Standard cron syntax is tried first; English is used as fallback.
+
 ### Full syntax (all options)
 
 ```yaml
@@ -225,7 +250,7 @@ mise exec -- cargo test     # Run tests
 2. **Tar available**: `tar` command for archive extraction
 3. **Shell available**: Jobs run via `sh -c "<command>"`
 4. **Remote auth**: SSH keys or credentials pre-configured for remote repos
-5. **Cron format**: Standard 5-field cron (via `croner` crate)
+5. **Schedule format**: Standard cron or English phrases (via `croner` + `english-to-cron`)
 
 ## Key Flows
 

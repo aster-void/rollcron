@@ -313,8 +313,7 @@ fn parse_job(
         ScheduleConfigRaw::Full(full) => (full.cron, full.timezone),
     };
 
-    let schedule = Cron::from_str(&cron_expr)
-        .map_err(|e| anyhow!("Invalid cron '{}': {}", cron_expr, e))?;
+    let schedule = parse_schedule(&cron_expr)?;
 
     // Extract run config
     let (run_sh, run_timeout, run_concurrency, run_retry, run_working_dir, run_env_file, run_env) =
@@ -454,6 +453,20 @@ fn parse_size(s: &str) -> Result<u64> {
     } else {
         Ok(s.parse()?)
     }
+}
+
+/// Parse schedule expression - supports both cron syntax and English phrases
+fn parse_schedule(expr: &str) -> Result<Cron> {
+    // Try standard cron first
+    Cron::from_str(expr).or_else(|cron_err| {
+        // Try English phrase (e.g., "7pm every Thursday")
+        english_to_cron::str_cron_syntax(expr)
+            .map_err(|_| anyhow!("Invalid schedule '{}': {}", expr, cron_err))
+            .and_then(|converted| {
+                Cron::from_str(&converted)
+                    .map_err(|e| anyhow!("Invalid schedule '{}' (converted to '{}'): {}", expr, converted, e))
+            })
+    })
 }
 
 #[cfg(test)]
@@ -1558,5 +1571,60 @@ jobs:
         assert_eq!(jobs[0].command, "./app");
         assert_eq!(jobs[0].timeout, Duration::from_secs(30));
         assert_eq!(jobs[0].log_file.as_deref(), Some("app.log"));
+    }
+
+    #[test]
+    fn parse_english_schedule() {
+        let yaml = r#"
+jobs:
+  weekly:
+    schedule: "7pm every Thursday"
+    run: echo weekly
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].command, "echo weekly");
+    }
+
+    #[test]
+    fn parse_english_schedule_daily() {
+        let yaml = r#"
+jobs:
+  daily:
+    schedule: "every day at 4:00 pm"
+    run: echo daily
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs.len(), 1);
+    }
+
+    #[test]
+    fn parse_english_schedule_every_minute() {
+        let yaml = r#"
+jobs:
+  frequent:
+    schedule: "every 5 minutes"
+    run: echo ping
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs.len(), 1);
+    }
+
+    #[test]
+    fn parse_english_schedule_with_full_syntax() {
+        let yaml = r#"
+jobs:
+  test:
+    schedule:
+      cron: "Sunday at 12:00"
+      timezone: Asia/Tokyo
+    run: echo sunday
+"#;
+        let (_, jobs) = parse_config(yaml).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            jobs[0].timezone,
+            Some(TimezoneConfig::Named(chrono_tz::Asia::Tokyo))
+        );
     }
 }

@@ -49,6 +49,23 @@ jobs:
         delay: 10s
 ```
 
+### Human-readable schedules
+
+```yaml
+jobs:
+  weekly:
+    schedule: "7pm every Thursday"
+    run: ./weekly-report.sh
+
+  daily:
+    schedule: "every day at 4:00 pm"
+    run: ./backup.sh
+
+  frequent:
+    schedule: "every 5 minutes"
+    run: ./health-check.sh
+```
+
 ### Build and run (compiled languages)
 
 ```yaml
@@ -178,13 +195,13 @@ Options:
 
 #### `jobs.<job-id>.schedule`
 
-Shorthand: `schedule: "*/5 * * * *"`
+Shorthand: `schedule: "*/5 * * * *"` or `schedule: "7pm every Thursday"`
 
 Full form:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `cron` | string | **required** | Cron expression (5 fields: min hour day month weekday) |
+| `cron` | string | **required** | Cron expression or English phrase |
 | `timezone` | string, optional | runner's | Job-specific timezone override |
 
 #### `jobs.<job-id>.build` (optional)
@@ -248,7 +265,9 @@ Full form:
 
 **Size**: `512K`, `10M`, `1G`, or bytes
 
-**Cron**: `min hour day month weekday` (e.g., `*/5 * * * *` = every 5 minutes)
+**Schedule**: Cron or English phrase
+- Cron: `min hour day month weekday` (e.g., `*/5 * * * *` = every 5 minutes)
+- English: `every 5 minutes`, `every day at 4:00 pm`, `7pm every Thursday`, `Sunday at 12:00`, `midnight on Tuesdays`
 
 ### Environment variable priority
 
