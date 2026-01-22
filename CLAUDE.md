@@ -172,6 +172,10 @@ Supported patterns (via [english-to-cron](https://github.com/kaplanelad/english-
 - `"every day at 4:00 pm"`, `"at 10:00 am"`
 - `"7pm every Thursday"`, `"Sunday at 12:00"`
 - `"midnight on Tuesdays"`, `"midnight on the 1st and 15th"`
+- `"noon every 3 days"` (interval-based)
+
+**Not supported** (silently misparsed):
+- `"midnight every weekday"`, `"noon every 2 weeks"`
 
 Standard cron syntax is tried first; English is used as fallback.
 
